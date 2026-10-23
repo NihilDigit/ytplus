@@ -1,0 +1,395 @@
+import type { AppConfig, Cue, VideoMetadata } from "../types";
+
+interface GmResponse {
+  status: number;
+  statusText: string;
+  responseText: string;
+}
+
+interface GmRequestDetails {
+  method: "GET" | "POST";
+  url: string;
+  headers?: Record<string, string>;
+  data?: string;
+  timeout?: number;
+  onprogress?: (res: GmResponse) => void;
+  onreadystatechange?: (res: GmResponse) => void;
+  onload?: (res: GmResponse) => void;
+  onerror?: (err: unknown) => void;
+  ontimeout?: () => void;
+}
+
+declare function GM_xmlhttpRequest(details: GmRequestDetails): { abort?: () => void };
+
+export function normalizeBaseUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (trimmed.endsWith("/chat/completions")) {
+    return trimmed.slice(0, -"/chat/completions".length);
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname === "" || parsed.pathname === "/") {
+      return `${trimmed}/v1`;
+    }
+  } catch {
+    // Keep as-is if URL constructor fails
+  }
+  return trimmed;
+}
+
+export function buildSystemPrompt(targetLang: string, customPrompt?: string): string {
+  const base = [
+    `你是一位专业视频字幕译者，负责将输入字幕逐条翻译为自然、准确、适合屏幕阅读的${targetLang}。`,
+    "翻译要求：",
+    "1. 行号严格对齐：输入格式为 `[序号] 原文`，输出必须严格对应为 `[序号] 译文`。每行只翻译该序号时间槽位内的词句；若一句话跨越多行，按自然语序在对应行内分段衔接，不合并、不跳号、不把下一行内容提前译入上一行。",
+    "2. 语音识别容错：若源字幕来自自动语音识别（ASR），可能存在同音误识别、吞音、断词或专有名词听错。请结合 `<video_metadata>` 与上下文逻辑推断真实语义后再翻译，避免按明显不通的错别字硬译。",
+    "3. 表达自然凝练：贴合视频主题与说话人口吻，译文简洁流畅，不输出任何解释、代码块标记或额外文本。",
+  ];
+  if (customPrompt && customPrompt.trim()) {
+    base.push(`4. 附加要求：${customPrompt.trim()}`);
+  }
+  return base.join("\n");
+}
+
+export function buildUserPrompt(
+  cuesToTranslate: Cue[],
+  contextCues: Cue[],
+  metadata: VideoMetadata,
+  followingCues: Cue[] = [],
+): string {
+  const sections: string[] = [];
+
+  const metaLines: string[] = [];
+  if (metadata.title) metaLines.push(`标题: ${metadata.title}`);
+  if (metadata.author) metaLines.push(`频道: ${metadata.author}`);
+  if (metadata.keywords && metadata.keywords.length > 0) {
+    metaLines.push(`标签: ${metadata.keywords.slice(0, 12).join(", ")}`);
+  }
+  if (metadata.description) {
+    const descExcerpt = metadata.description
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 600);
+    if (descExcerpt) {
+      metaLines.push(`简介摘录: ${descExcerpt}`);
+    }
+  }
+
+  if (metaLines.length > 0) {
+    sections.push(`<video_metadata>\n${metaLines.join("\n")}\n</video_metadata>`);
+  }
+
+  if (contextCues.length > 0) {
+    const ctxLines = contextCues.map((c) =>
+      c.targetText
+        ? `[${c.index}] ${c.sourceText} => ${c.targetText}`
+        : `[${c.index}] ${c.sourceText}`,
+    );
+    sections.push(
+      `<preceding_context_do_not_translate>\n${ctxLines.join("\n")}\n</preceding_context_do_not_translate>`,
+    );
+  }
+
+  const sourceLines = cuesToTranslate.map((c) => `[${c.index}] ${c.sourceText}`);
+  sections.push(
+    `<source_cues_to_translate>\n${sourceLines.join("\n")}\n</source_cues_to_translate>`,
+  );
+
+  if (followingCues.length > 0) {
+    const nextLines = followingCues.map((c) => `[${c.index}] ${c.sourceText}`);
+    sections.push(
+      `<following_context_do_not_translate>\n${nextLines.join("\n")}\n</following_context_do_not_translate>`,
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+const LINE_MATCH_REGEX = /^\s*\[(\d+)\]\s*(.+?)\s*$/;
+
+/**
+ * Parses numbered lines `[index] translatedText` from model output text.
+ */
+export function parseTranslatedLines(
+  text: string,
+  validIndices?: Set<number>,
+): Map<number, string> {
+  const result = new Map<number, string>();
+  const lines = text.split(/\r?\n/);
+
+  for (const line of lines) {
+    const match = LINE_MATCH_REGEX.exec(line);
+    if (!match) continue;
+    const idx = Number.parseInt(match[1], 10);
+    const content = match[2].trim();
+    if (!content) continue;
+    if (validIndices && !validIndices.has(idx)) continue;
+    result.set(idx, content);
+  }
+
+  return result;
+}
+
+/**
+ * Extracts accumulated assistant content from an SSE stream buffer or standard JSON response.
+ */
+export function extractContentFromResponseText(rawText: string): {
+  fullContent: string;
+  isSse: boolean;
+} {
+  const trimmed = rawText.trimStart();
+  if (trimmed.startsWith("data:")) {
+    let accumulated = "";
+    const lines = rawText.split(/\r?\n/);
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s.startsWith("data:")) continue;
+      const payload = s.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(payload);
+        const delta = parsed?.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") {
+          accumulated += delta;
+        } else if (typeof parsed?.choices?.[0]?.message?.content === "string") {
+          accumulated += parsed.choices[0].message.content;
+        }
+      } catch {
+        // Ignore incomplete SSE line at tail of buffer
+      }
+    }
+    return { fullContent: accumulated, isSse: true };
+  }
+
+  try {
+    const parsed = JSON.parse(rawText);
+    const content = parsed?.choices?.[0]?.message?.content;
+    if (typeof content === "string") {
+      return { fullContent: content, isSse: false };
+    }
+  } catch {
+    // Not complete JSON yet
+  }
+
+  return { fullContent: "", isSse: false };
+}
+
+export async function fetchAvailableModels(
+  apiBaseUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  const base = normalizeBaseUrl(apiBaseUrl);
+  if (!base) {
+    throw new Error("请先填写 API Base URL");
+  }
+  const url = `${base}/models`;
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  if (apiKey.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`;
+  }
+
+  const rawText = await new Promise<string>((resolve, reject) => {
+    if (typeof GM_xmlhttpRequest === "function") {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        headers,
+        timeout: 15000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            resolve(res.responseText);
+          } else {
+            reject(new Error(`HTTP ${res.status}: ${res.responseText.slice(0, 200)}`));
+          }
+        },
+        onerror: () => reject(new Error("网络请求失败，请检查地址与服务状态")),
+        ontimeout: () => reject(new Error("请求超时")),
+      });
+    } else {
+      fetch(url, { headers })
+        .then(async (res) => {
+          const text = await res.text();
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+          return text;
+        })
+        .then(resolve)
+        .catch(reject);
+    }
+  });
+
+  const parsed = JSON.parse(rawText);
+  const list: unknown[] = Array.isArray(parsed?.data)
+    ? parsed.data
+    : Array.isArray(parsed?.models)
+      ? parsed.models
+      : [];
+
+  const models: string[] = [];
+  for (const item of list) {
+    if (typeof item === "string") {
+      models.push(item);
+    } else if (item && typeof item === "object" && "id" in item && typeof item.id === "string") {
+      models.push(item.id);
+    }
+  }
+  return models;
+}
+
+export interface TranslateBatchOptions {
+  config: AppConfig;
+  cues: Cue[];
+  contextCues: Cue[];
+  followingCues?: Cue[];
+  metadata: VideoMetadata;
+  signal?: AbortSignal;
+  onCueTranslated?: (cueIndex: number, translatedText: string) => void;
+}
+
+export async function translateCueBatch(
+  options: TranslateBatchOptions,
+): Promise<Map<number, string>> {
+  const {
+    config,
+    cues,
+    contextCues,
+    followingCues = [],
+    metadata,
+    signal,
+    onCueTranslated,
+  } = options;
+  const base = normalizeBaseUrl(config.apiBaseUrl);
+  if (!base) {
+    throw new Error("未配置 API Base URL");
+  }
+  if (!config.model.trim()) {
+    throw new Error("未配置模型名称");
+  }
+  if (cues.length === 0) {
+    return new Map();
+  }
+
+  const url = `${base}/chat/completions`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream, application/json",
+  };
+  if (config.apiKey.trim()) {
+    headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+  }
+
+  const validIndices = new Set(cues.map((c) => c.index));
+  const emitted = new Map<number, string>();
+
+  const emitFromContent = (content: string, includeLastLine: boolean) => {
+    const lines = content.split(/\r?\n/);
+    const limit = includeLastLine ? lines.length : Math.max(0, lines.length - 1);
+    for (let i = 0; i < limit; i++) {
+      const match = LINE_MATCH_REGEX.exec(lines[i]);
+      if (!match) continue;
+      const idx = Number.parseInt(match[1], 10);
+      const text = match[2].trim();
+      if (!text || !validIndices.has(idx)) continue;
+      if (emitted.get(idx) !== text) {
+        emitted.set(idx, text);
+        onCueTranslated?.(idx, text);
+      }
+    }
+  };
+
+  const executeRequest = async (targetCues: Cue[], ctxCues: Cue[], nextCues: Cue[]) => {
+    const requestBody = JSON.stringify({
+      model: config.model.trim(),
+      messages: [
+        {
+          role: "system",
+          content: buildSystemPrompt(config.targetLang, config.customPrompt),
+        },
+        {
+          role: "user",
+          content: buildUserPrompt(targetCues, ctxCues, metadata, nextCues),
+        },
+      ],
+      temperature: 0.2,
+      stream: true,
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+
+      if (typeof GM_xmlhttpRequest === "function") {
+        const handle = GM_xmlhttpRequest({
+          method: "POST",
+          url,
+          headers,
+          data: requestBody,
+          timeout: 90000,
+          onprogress: (res) => {
+            if (!res.responseText) return;
+            const { fullContent } = extractContentFromResponseText(res.responseText);
+            if (fullContent) {
+              emitFromContent(fullContent, false);
+            }
+          },
+          onload: (res) => {
+            if (res.status < 200 || res.status >= 300) {
+              reject(
+                new Error(`翻译请求失败 (HTTP ${res.status}): ${res.responseText.slice(0, 240)}`),
+              );
+              return;
+            }
+            const { fullContent } = extractContentFromResponseText(res.responseText);
+            emitFromContent(fullContent, true);
+            resolve();
+          },
+          onerror: () => reject(new Error("翻译网络请求出错")),
+          ontimeout: () => reject(new Error("翻译请求超时")),
+        });
+
+        if (signal) {
+          signal.addEventListener(
+            "abort",
+            () => {
+              handle.abort?.();
+              reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        }
+        return;
+      }
+
+      fetch(url, {
+        method: "POST",
+        headers,
+        body: requestBody,
+        signal,
+      })
+        .then(async (res) => {
+          const text = await res.text();
+          if (!res.ok) {
+            throw new Error(`翻译请求失败 (HTTP ${res.status}): ${text.slice(0, 240)}`);
+          }
+          const { fullContent } = extractContentFromResponseText(text);
+          emitFromContent(fullContent, true);
+          resolve();
+        })
+        .catch(reject);
+    });
+  };
+
+  await executeRequest(cues, contextCues, followingCues);
+
+  // If the LLM accidentally skipped any cue indices in the batch, do a quick repair pass
+  const missingCues = cues.filter((c) => !emitted.has(c.index));
+  if (missingCues.length > 0 && missingCues.length < cues.length && !signal?.aborted) {
+    await executeRequest(missingCues, contextCues, followingCues);
+  }
+
+  return emitted;
+}

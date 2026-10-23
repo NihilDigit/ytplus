@@ -1,0 +1,17 @@
+{
+  "name": "ytpremiumplus",
+  "version": "0.1.0",
+  "description": "YouTube fansub-style LLM subtitle translator, performance optimizer, and Windows tablet/desktop dual-mode touch enhancer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "watch": "bun run scripts/build.ts --watch",
+    "dev": "bun run scripts/build.ts --dev",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

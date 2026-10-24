@@ -1,7 +1,7 @@
 {
-  "name": "ytpremiumplus",
-  "version": "0.1.0",
-  "description": "YouTube fansub-style LLM subtitle translator, performance optimizer, and Windows tablet/desktop dual-mode touch enhancer",
+  "name": "ytplus",
+  "version": "0.2.0",
+  "description": "YT+ — YouTube fansub-grade batched LLM subtitle & metadata translator, 3-tier caption waterfall, SponsorBlock, tablet touch gestures, and Android LSPosed module",
   "private": true,
   "type": "module",
   "scripts": {

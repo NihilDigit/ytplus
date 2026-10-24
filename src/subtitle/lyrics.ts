@@ -22,7 +22,7 @@ declare function GM_xmlhttpRequest(details: GmRequestDetails): { abort?: () => v
 const lyricsCacheByVideo = new Map<string, string | null>();
 
 const MUSIC_OR_LYRIC_HINT_REGEX =
-  /\b(?:erb|epic\s+rap\s+battles|rap\s+battle|lyrics?|official\s+(?:music\s+)?video|music\s+video|mv|song|feat\.?|ft\.?|versus|vs\.?|cypher|diss\s+track|freestyle|remix|soundtrack|ost)\b/i;
+  /\b(?:erb|epic\s+rap\s+battles|rap\s+battle|lyrics?|official\s+(?:music\s+)?video|music\s+video|mv|song|feat\.?|ft\.?|versus|vs\.?|cypher|diss\s+track|freestyle|remix|soundtrack|ost)\b|歌ってみた|mv|オリジナル曲/i;
 
 const TITLE_NOISE_REGEX =
   /\s*(?:\(|\[)(?:official\s*(?:music\s*)?video|official\s*audio|lyric\s*video|lyrics?|hd|4k|hq|visualizer|explicit|clean|mv)(?:\)|\])\s*/gi;
@@ -249,13 +249,37 @@ export function shouldAttemptLyricsLookup(
   const isAsr = track.kind === "asr" || track.vssId?.startsWith("a.");
   if (!isAsr) return false;
 
+  // Phonetic Needleman-Wunsch alignment operates on Latin words; skip CJK/non-Latin ASR tracks
+  const lang = (track.languageCode || "").toLowerCase();
+  if (/^(?:ja|zh|ko|ar|he|th|hi|ru|uk)\b/.test(lang)) {
+    return false;
+  }
+
   const events = payload.events || [];
-  if (!hasAsrAutoPunctuation(events)) {
-    return true;
+  let maxEndMs = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (typeof ev.tStartMs === "number") {
+      maxEndMs = ev.tStartMs + (ev.dDurationMs ?? 0);
+      break;
+    }
+  }
+  // Songs and music videos are under 10 minutes; never run lyrics lookup on long videos/streams
+  if (maxEndMs > 10 * 60 * 1000) {
+    return false;
   }
 
   const combinedMeta = `${metadata.title || ""} ${metadata.author || ""} ${(metadata.keywords || []).join(" ")}`;
-  return MUSIC_OR_LYRIC_HINT_REGEX.test(combinedMeta);
+  if (MUSIC_OR_LYRIC_HINT_REGEX.test(combinedMeta)) {
+    return true;
+  }
+
+  // Only treat unpunctuated ASR as a music candidate if it's a short (<= 6.5 min) Latin track
+  if (!hasAsrAutoPunctuation(events) && maxEndMs > 0 && maxEndMs <= 6.5 * 60 * 1000) {
+    return true;
+  }
+
+  return false;
 }
 
 /**

@@ -393,3 +393,114 @@ export async function translateCueBatch(
 
   return emitted;
 }
+
+export interface TranslatedMetadataResult {
+  title: string;
+  description: string;
+}
+
+export async function translateVideoMetadata(
+  config: AppConfig,
+  metadata: VideoMetadata,
+  signal?: AbortSignal,
+): Promise<TranslatedMetadataResult | null> {
+  const base = normalizeBaseUrl(config.apiBaseUrl);
+  if (!base || !config.model.trim() || (!metadata.title.trim() && !metadata.description.trim())) {
+    return null;
+  }
+
+  const url = `${base}/chat/completions`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+  };
+  if (config.apiKey.trim()) {
+    headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+  }
+
+  const descTrimmed = (metadata.description || "").trim().slice(0, 1800);
+  const sysPrompt = [
+    `你是一位资深视频编辑与本地化译者。请将输入的 YouTube 视频标题和简介翻译为自然、准确、符合母语习惯的${config.targetLang}。`,
+    "请严格按以下 XML 标签格式输出，不要输出任何额外说明或代码块标记：",
+    "<title>翻译后的标题</title>",
+    "<description>翻译后的简介（保留原有段落结构、时间轴锚点与核心信息）</description>",
+  ].join("\n");
+
+  const userPrompt = [
+    `<channel>${metadata.author || ""}</channel>`,
+    `<title>${metadata.title || ""}</title>`,
+    `<description>\n${descTrimmed}\n</description>`,
+  ].join("\n");
+
+  const requestBody = JSON.stringify({
+    model: config.model.trim(),
+    messages: [
+      { role: "system", content: sysPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.2,
+    stream: false,
+  });
+
+  const rawText = await new Promise<string>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+
+    if (typeof GM_xmlhttpRequest === "function") {
+      const handle = GM_xmlhttpRequest({
+        method: "POST",
+        url,
+        headers,
+        data: requestBody,
+        timeout: 45000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            resolve(res.responseText);
+          } else {
+            reject(new Error(`HTTP ${res.status}`));
+          }
+        },
+        onerror: () => reject(new Error("Network error")),
+        ontimeout: () => reject(new Error("Timeout")),
+      });
+
+      if (signal) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            handle.abort?.();
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      }
+      return;
+    }
+
+    fetch(url, { method: "POST", headers, body: requestBody, signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.text();
+      })
+      .then(resolve)
+      .catch(reject);
+  });
+
+  const { fullContent } = extractContentFromResponseText(rawText);
+  if (!fullContent) return null;
+
+  const titleMatch = /<title>([\s\S]*?)<\/title>/i.exec(fullContent);
+  const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(fullContent);
+  const translatedTitle = (titleMatch ? titleMatch[1] : "").trim();
+  const translatedDesc = (descMatch ? descMatch[1] : "").trim();
+  if (!translatedTitle && !translatedDesc) {
+    return null;
+  }
+
+  return {
+    title: translatedTitle,
+    description: translatedDesc,
+  };
+}

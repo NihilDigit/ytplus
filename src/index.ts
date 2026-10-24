@@ -1,4 +1,5 @@
 import { PerformanceOptimizer } from "./perf/optimizer";
+import { SponsorBlockManager } from "./sponsorblock/manager";
 import { getCurrentVideoId, installTimedTextInterceptor } from "./subtitle/extractor";
 import { SubtitleManager } from "./subtitle/manager";
 import { TouchGestureController } from "./touch/gestures";
@@ -13,9 +14,10 @@ function bootstrap(): void {
   // 1. Install network observer early to capture signed /api/timedtext URLs
   installTimedTextInterceptor();
 
-  // 2. Initialize performance optimizer, subtitle pipeline, touch gestures, and UI
+  // 2. Initialize performance optimizer, subtitle pipeline, SponsorBlock, touch gestures, and UI
   const perfOptimizer = new PerformanceOptimizer();
   const subtitleManager = new SubtitleManager();
+  const sponsorBlock = new SponsorBlockManager();
   const touchController = new TouchGestureController(subtitleManager);
   const settingsUI = new SettingsPanelUI(subtitleManager);
 
@@ -32,6 +34,7 @@ function bootstrap(): void {
       const videoId = getCurrentVideoId();
       if (!videoId) {
         subtitleManager.reset();
+        sponsorBlock.reset();
         return;
       }
 
@@ -45,6 +48,7 @@ function bootstrap(): void {
       touchController.attachToPlayer(player);
       settingsUI.mountPlayerButtons(player);
       void subtitleManager.attachToVideo(videoId);
+      void sponsorBlock.attachToVideo(videoId, player);
     }, 100);
   };
 

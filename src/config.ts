@@ -3,9 +3,11 @@ import type { AppConfig } from "./types";
 const STORAGE_KEY = "ytpp_config_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
+  uiLang: "auto",
   apiBaseUrl: "",
   apiKey: "",
   model: "",
+  cachedModels: [],
   targetLang: "简体中文",
   customPrompt: "",
   subtitleMode: "bilingual",
@@ -16,6 +18,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   fontSizeScale: 1.0,
   subtitleBottomPercent: 6,
   subtitleBackdrop: true,
+  subtitleBackdropOpacity: 0.42,
+  translateMetadata: true,
 
   perfDisableAmbient: true,
   perfDisableInlinePreview: true,
@@ -27,6 +31,9 @@ export const DEFAULT_CONFIG: AppConfig = {
   touchEnlargeControls: true,
   touchSingleTapToggleControls: true,
   touchDoubleTapSeekSec: 10,
+
+  sbEnabled: true,
+  sbCategories: ["sponsor", "selfpromo", "interaction"],
 };
 
 type ConfigListener = (config: AppConfig) => void;

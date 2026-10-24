@@ -4,17 +4,24 @@ import { resolve } from "node:path";
 const VERSION = "0.2.0";
 const srcDir = resolve(import.meta.dir, "../src");
 const outDir = resolve(import.meta.dir, "../dist");
-const outFile = resolve(outDir, "ytpremiumplus.user.js");
+const outFile = resolve(outDir, "ytplus.user.js");
+const legacyOutFile = resolve(outDir, "ytpremiumplus.user.js");
 const devLoaderFile = resolve(outDir, "ytpremiumplus.dev.user.js");
 const fileUrl = `file:///${outFile.replace(/\\/g, "/")}`;
 
 function createHeader(extraLines: string[] = []): string {
   const lines = [
     "// ==UserScript==",
-    "// @name         YT Premium Plus (字幕组精翻 / 性能优化 / 平板触屏改造)",
-    "// @namespace    https://github.com/NihilDigit/ytpremiumplus",
+    "// @name         YT+",
+    "// @name:zh-CN   YT+",
+    "// @name:en      YT+",
+    "// @namespace    https://github.com/NihilDigit/ytplus",
+    "// @homepageURL  https://github.com/NihilDigit/ytplus",
+    "// @supportURL   https://github.com/NihilDigit/ytplus/issues",
     `// @version      ${VERSION}`,
-    "// @description  YouTube 字幕组式分批 LLM 翻译（起播/Seek 10句极速预翻 + 50句后台批量精翻 + 视频元信息上下文），搭配界面渲染减负与桌面/Windows平板双模触屏手势改造",
+    "// @description  YouTube 字幕组式分批 LLM 翻译、标题简介本地化、三级字幕源瀑布流、SponsorBlock 自动跳过与平板触屏增强",
+    "// @description:zh-CN YouTube 字幕组式分批 LLM 翻译、标题简介本地化、三级字幕源瀑布流、SponsorBlock 自动跳过与平板触屏增强",
+    "// @description:en Fansub-grade batched LLM subtitle & metadata translation, 3-tier caption waterfall, SponsorBlock auto-skip, and tablet touch gestures for YouTube",
     "// @author       NihilDigit",
     "// @license      MIT",
     "// @match        https://www.youtube.com/*",
@@ -55,7 +62,9 @@ async function buildOnce(): Promise<boolean> {
   mkdirSync(outDir, { recursive: true });
 
   // 1. Full standalone userscript
-  writeFileSync(outFile, `${createHeader()}\n\n${body}`, "utf8");
+  const fullScript = `${createHeader()}\n\n${body}`;
+  writeFileSync(outFile, fullScript, "utf8");
+  writeFileSync(legacyOutFile, fullScript, "utf8");
 
   // 2. Lightweight @require file:// loader for Tampermonkey instant local hot-reload
   const devHeader = createHeader([`// @require      ${fileUrl}`]);

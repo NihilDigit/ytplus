@@ -1,4 +1,5 @@
 import { configStore } from "../config";
+import { tr } from "../i18n";
 import type { CaptionTrackInfo, Cue, VideoMetadata } from "../types";
 import { subtitleCache } from "./cache";
 import {
@@ -19,6 +20,7 @@ import {
   fetchExternalLyricsForVideo,
   shouldAttemptLyricsLookup,
 } from "./lyrics";
+import { MetadataTranslator } from "./metadata-translator";
 import { SubtitleOverlay } from "./overlay";
 
 const CONTEXT_WINDOW_CUES = 4;
@@ -50,6 +52,7 @@ function snapBatchEndIndex(
 
 export class SubtitleManager {
   private overlay = new SubtitleOverlay();
+  private metadataTranslator = new MetadataTranslator();
   private currentVideoId: string | null = null;
   private currentTrack: CaptionTrackInfo | null = null;
   private tracks: CaptionTrackInfo[] = [];
@@ -66,13 +69,21 @@ export class SubtitleManager {
   private trackLoadGeneration = 0;
 
   /**
-   * When true, locks the video in a paused + native buffering spinner state
-   * until the initial/seek 10-cue fast batch finishes.
+   * Demand-driven buffering gate state:
+   * Only pauses playback when the playback cursor actually reaches an untranslated cue,
+   * and unlocks as soon as the first 2 cues ahead of the cursor stream in via SSE.
    */
   private bufferingLockActive = false;
   private resumePlayAfterUnlock = false;
+  private fastBatchRunning = false;
+  private fastBatchStatusText = "准备字幕...";
+  private holdBypassedGeneration = -1;
+  private lastInternalPauseAt = 0;
 
   constructor() {
+    this.overlay.setOnSkipBuffering(() => {
+      this.skipBufferingWait();
+    });
     configStore.subscribe((cfg) => {
       this.overlay.applyConfigStyles();
       this.refreshCurrentCueDisplay();
@@ -126,10 +137,10 @@ export class SubtitleManager {
 
     this.overlay.mount(player);
     this.bindVideoEvents(video);
+    void this.metadataTranslator.attachToVideo(videoId);
 
-    // If fast-batch hold is enabled and translation is active, lock buffering immediately on video load
     if (this.shouldUseBufferingLock()) {
-      this.lockBuffering(true, "加载字幕...");
+      this.lockBuffering(true, tr("正在加载字幕...", "Loading captions..."));
     }
 
     let tracks = extractCaptionTracks(videoId);
@@ -179,14 +190,23 @@ export class SubtitleManager {
 
   private lockBuffering(forceResumeOnUnlock: boolean, statusText: string): void {
     if (!this.videoEl) return;
+    if (this.holdBypassedGeneration === this.pipelineGeneration) return;
     if (!this.bufferingLockActive) {
       this.resumePlayAfterUnlock = forceResumeOnUnlock || !this.videoEl.paused;
       this.bufferingLockActive = true;
     }
     this.overlay.setBuffering(true, statusText);
     if (!this.videoEl.paused) {
+      this.lastInternalPauseAt = performance.now();
       this.videoEl.pause();
     }
+  }
+
+  skipBufferingWait(): void {
+    this.holdBypassedGeneration = this.pipelineGeneration;
+    if (!this.bufferingLockActive) return;
+    this.resumePlayAfterUnlock = true;
+    this.unlockBuffering();
   }
 
   private unlockBuffering(): void {
@@ -205,7 +225,7 @@ export class SubtitleManager {
     const loadGen = ++this.trackLoadGeneration;
     this.currentTrack = track;
     if (this.shouldUseBufferingLock()) {
-      this.lockBuffering(true, "加载字幕...");
+      this.lockBuffering(true, tr("正在加载字幕...", "Loading captions..."));
     }
 
     const payload = await fetchSubtitleJson3(videoId, track);
@@ -215,7 +235,7 @@ export class SubtitleManager {
 
     if (!payload) {
       this.unlockBuffering();
-      this.overlay.setStatus("字幕加载失败");
+      this.overlay.setStatus(tr("字幕加载失败", "Failed to load captions"));
       setTimeout(() => this.overlay.setStatus(null), 2500);
       return;
     }
@@ -230,7 +250,7 @@ export class SubtitleManager {
     let normalized: Cue[] | null = null;
     if (shouldAttemptLyricsLookup(track, metadata, payload)) {
       if (this.bufferingLockActive) {
-        this.overlay.setBuffering(true, "匹配歌词时间轴...");
+        this.overlay.setBuffering(true, tr("正在检索外部轴与文稿...", "Checking external transcript..."));
       }
       const externalLyrics = await fetchExternalLyricsForVideo(metadata);
       if (this.currentVideoId !== videoId || this.trackLoadGeneration !== loadGen) {
@@ -315,6 +335,7 @@ export class SubtitleManager {
     const tick = () => {
       if (this.videoEl) {
         if (this.bufferingLockActive && !this.videoEl.paused) {
+          this.lastInternalPauseAt = performance.now();
           this.videoEl.pause();
         } else if (!this.videoEl.paused) {
           this.syncCueAtTime(this.videoEl.currentTime * 1000);
@@ -338,9 +359,9 @@ export class SubtitleManager {
   };
 
   private onPlay = (): void => {
-    // Keep playback locked in buffering state while fast-batch translation is in progress
     if (this.bufferingLockActive && this.videoEl && !this.videoEl.paused) {
       this.resumePlayAfterUnlock = true;
+      this.lastInternalPauseAt = performance.now();
       this.videoEl.pause();
     }
   };
@@ -355,15 +376,16 @@ export class SubtitleManager {
     const cursorMs = this.videoEl.currentTime * 1000;
     this.syncCueAtTime(cursorMs);
 
-    // Check immediately if seek destination has untranslated cues in the 10-cue window;
-    // if so, lock buffering right away so the video doesn't play untranslated frames during debounce.
+    // Lock immediately if seek destination has untranslated cues in the fast-batch window
     if (this.shouldUseBufferingLock() && this.cues.length > 0) {
       const startIdx = findCurrentOrNextCueIndex(this.cues, cursorMs);
       if (startIdx >= 0) {
         const fastSize = Math.max(1, configStore.get().fastBatchSize || 10);
-        const fastWindow = this.cues.slice(startIdx, Math.min(this.cues.length, startIdx + fastSize));
+        const fastEndExclusive = snapBatchEndIndex(this.cues, startIdx, fastSize, 3);
+        const fastWindow = this.cues.slice(startIdx, fastEndExclusive);
         if (fastWindow.some((c) => !c.targetText)) {
-          this.lockBuffering(true, "翻译字幕...");
+          const total = fastWindow.filter((c) => !c.targetText).length;
+          this.lockBuffering(true, `${tr("正在预翻字幕", "Translating")} 0/${total}`);
         }
       }
     }
@@ -399,7 +421,7 @@ export class SubtitleManager {
     }
     if (!cfg.apiBaseUrl.trim() || !cfg.model.trim()) {
       this.unlockBuffering();
-      this.overlay.setStatus("未配置翻译接口");
+      this.overlay.setStatus(tr("未配置翻译接口", "Translation API not configured"));
       return;
     }
     if (!this.videoEl || this.cues.length === 0 || !this.currentVideoId || !this.currentTrack) {
@@ -462,15 +484,17 @@ export class SubtitleManager {
     const metadata = this.metadata || extractVideoMetadata(videoId);
 
     try {
-      // Stage 1: 10-Cue Fast Batch with playback locked in buffering state
+      // Stage 1: Fast Batch with YouTube-style center buffering indicator & progress bar
       if (missingFastCues.length > 0) {
         const totalFast = missingFastCues.length;
         let completedInFast = 0;
+        this.fastBatchRunning = true;
+        this.fastBatchStatusText = `${tr("正在预翻字幕", "Translating")} 0/${totalFast}`;
 
         if (cfg.holdPlaybackForFastBatch) {
-          this.lockBuffering(trigger === "initial", `翻译字幕 0/${totalFast}`);
+          this.lockBuffering(trigger === "initial", this.fastBatchStatusText);
         } else {
-          this.overlay.setStatus(`翻译字幕 0/${totalFast}`);
+          this.overlay.setStatus(this.fastBatchStatusText);
         }
 
         const firstIdx = missingFastCues[0].index;
@@ -492,11 +516,11 @@ export class SubtitleManager {
               this.cues[cueIdx].targetText = text;
               partialCache[cueIdx] = text;
               completedInFast++;
-              const progressText = `翻译字幕 ${Math.min(completedInFast, totalFast)}/${totalFast}`;
+              this.fastBatchStatusText = `${tr("正在预翻字幕", "Translating")} ${Math.min(completedInFast, totalFast)}/${totalFast}`;
               if (this.bufferingLockActive) {
-                this.overlay.setBuffering(true, progressText);
+                this.overlay.setBuffering(true, this.fastBatchStatusText);
               } else {
-                this.overlay.setStatus(progressText);
+                this.overlay.setStatus(this.fastBatchStatusText);
               }
               if (cueIdx === this.activeCueIndex) {
                 this.overlay.renderCue(this.cues[cueIdx]);
@@ -511,9 +535,11 @@ export class SubtitleManager {
           void subtitleCache.merge(cacheKey, partialCache);
         }
 
+        this.fastBatchRunning = false;
         this.refreshCurrentCueDisplay();
         this.unlockBuffering();
       } else {
+        this.fastBatchRunning = false;
         this.unlockBuffering();
       }
 
@@ -594,10 +620,11 @@ export class SubtitleManager {
       if (signal.aborted || this.pipelineGeneration !== generation) {
         return;
       }
+      this.fastBatchRunning = false;
       this.unlockBuffering();
       const msg = err instanceof Error ? err.message : String(err);
       console.warn("[YT+] Subtitle translation error:", msg);
-      this.overlay.setStatus(`翻译失败: ${msg.slice(0, 48)}`);
+      this.overlay.setStatus(`${tr("翻译失败", "Translation failed")}: ${msg.slice(0, 48)}`);
       setTimeout(() => {
         if (this.pipelineGeneration === generation) {
           this.overlay.setStatus(null);
@@ -611,6 +638,7 @@ export class SubtitleManager {
   }
 
   private cancelActivePipeline(keepBufferingLock = false): void {
+    this.fastBatchRunning = false;
     if (!keepBufferingLock) {
       this.unlockBuffering();
     }
@@ -635,5 +663,6 @@ export class SubtitleManager {
     this.cues = [];
     this.activeCueIndex = -1;
     this.overlay.clear();
+    this.metadataTranslator.reset();
   }
 }

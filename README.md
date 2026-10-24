@@ -1,6 +1,6 @@
-# YT Premium Plus
+# YT+
 
-针对桌面端与 Windows 平板双模环境设计的 YouTube 优化油猴脚本（Userscript），集成字幕组式分批精翻、界面性能减负与触控手势交互。
+针对桌面端、Windows 平板与 Android（LSPosed API 101）设计的 YouTube 增强工具，集成三级字幕源瀑布流、字幕组式分批 LLM 精翻、SponsorBlock 片段自动跳过、界面渲染减负与触控手势交互。
 
 ## 核心设计
 
@@ -33,11 +33,32 @@
   - **双指捏合**：在原始比例与裁切铺满（`object-fit: cover`）之间切换。
 - 针对粗指针设备自动加高 `.ytp-progress-bar-padding` 拖拽热区，并在新版 `yt-lockup-view-model` 卡片上常驻显示更多操作按钮。
 
+- **视频标题与简介本地化 (`metadata-translator.ts`)**：
+  - 自动并行翻译当前视频的标题与简介（自适应浅色/深色主题字色，简介折叠态保持 2 行紧凑预览，展开后显示完整译文）。
+- **SponsorBlock 自动跳过 (`src/sponsorblock/manager.ts`)**：
+  - 支持 8 类片段（赞助广告、自我推广、互动提醒、片头、片尾、预告、非音乐片段、水时长片段）的进度条色标渲染与自动跳过，并提供右下角即时「撤回」浮层。
+- **中英文双语界面 (`src/i18n.ts`)**：
+  - 自动识别页面/浏览器语言，并支持在 `YT+` 控制中心顶栏一键切换 `中文 / EN`。
+
+### 4. Android LSPosed (API 101) 原生模块 (`android/`)
+- **包名与架构 (`dev.nihildigit.ytplus`)**：
+  - 基于 `io.github.libxposed:api:101.0.1` + `io.github.libxposed:service:101.0.0` 与 `org.luckypray:dexkit:2.3.0`，全量通过 **16KB 页大小对齐 (`zipalign -c -P 16 -v 4`)**，支持 Android 15–17 (SDK 37)。
+  - 复用桌面端同构的三级字幕源瀑布流、句内平衡 DP 断句与分批流式翻译调度器 (`core/`)。
+  - 通过系统级 `android.media.session.MediaSession` 与 Cronet / Innertube 自动字幕轨拉取实现免混淆的毫秒级进度同步、起播预翻译等待控制与无感字幕加载（即使 YouTube 原生 CC 关闭亦可自动拉取字幕）。
+  - 宿主设置页采用 Jetpack Compose **Material 3 Expressive** 设计，并在 YouTube 播放器右上角原生按钮栏 (`player_additional_view_container`) 内嵌 `YT+` 快捷设置入口。
+
 ## 构建与测试
 
+### Web Userscript
 ```bash
 bun test
 bun run build
 ```
+构建产物位于 `dist/ytplus.user.js`，可直接导入 Tampermonkey 或 Violentmonkey 使用。
 
-构建产物位于 `dist/ytpremiumplus.user.js`，可直接导入 Tampermonkey 或 Violentmonkey 使用。
+### Android LSPosed 模块
+```bash
+cd android
+./gradlew :app:testDebugUnitTest :app:assembleDebug
+```
+产物位于 `android/app/build/outputs/apk/debug/app-debug.apk`。

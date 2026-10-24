@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">YT+</string>
+    <string name="xposed_description">YouTube 双语流式字幕与 SponsorBlock 增强模块</string>
+</resources>

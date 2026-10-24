@@ -1,8 +1,24 @@
 import { configStore } from "../config";
+import { tr } from "../i18n";
 import type { SubtitleManager } from "../subtitle/manager";
 import { el, formatTimeMs, removeStyle, upsertStyle } from "../utils/dom";
 
 const TOUCH_STYLE_ID = "ytpp-touch-adaptation-style";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const PLAY_ICON_PATH = "M8 5v14l11-7z";
+const PAUSE_ICON_PATH = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
+
+function createPlayerSvgIcon(pathD: string): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "28");
+  svg.setAttribute("height", "28");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", pathD);
+  path.setAttribute("fill", "#ffffff");
+  svg.appendChild(path);
+  return svg;
+}
 
 interface YtPlayerWithVolume extends HTMLElement {
   getVolume?: () => number;
@@ -40,6 +56,9 @@ export class TouchGestureController {
   private lastTapX = 0;
   private lastTapY = 0;
   private singleTapTimer: ReturnType<typeof setTimeout> | null = null;
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private longPressActive = false;
+  private savedPlaybackRate = 1;
 
   constructor(subtitleManager: SubtitleManager) {
     this.subtitleManager = subtitleManager;
@@ -214,7 +233,6 @@ export class TouchGestureController {
     if (!this.centerPlayBtn || !player.contains(this.centerPlayBtn)) {
       this.centerPlayBtn = el("button", {
         className: "ytpp-touch-center-btn",
-        text: "⏸",
         attrs: { type: "button", "aria-label": "播放或暂停" },
         on: {
           click: (e) => {
@@ -224,16 +242,38 @@ export class TouchGestureController {
             if (!video) return;
             if (video.paused) {
               void video.play();
-              this.centerPlayBtn!.textContent = "⏸";
             } else {
               video.pause();
-              this.centerPlayBtn!.textContent = "▶";
             }
+            this.syncCenterPlayIcon(video);
             this.scheduleAutoHideTouchControls(player);
           },
         },
       });
+      this.centerPlayBtn.appendChild(createPlayerSvgIcon(PAUSE_ICON_PATH));
       player.appendChild(this.centerPlayBtn);
+    }
+
+    const video = this.getVideo(player);
+    if (video && video.dataset.ytppIconSyncBound !== "1") {
+      video.dataset.ytppIconSyncBound = "1";
+      video.addEventListener("play", () => this.syncCenterPlayIcon(video));
+      video.addEventListener("pause", () => this.syncCenterPlayIcon(video));
+      this.syncCenterPlayIcon(video);
+    }
+  }
+
+  private syncCenterPlayIcon(video: HTMLVideoElement | null): void {
+    if (!this.centerPlayBtn || !video) return;
+    const pathEl = this.centerPlayBtn.querySelector("path");
+    const targetPath = video.paused ? PLAY_ICON_PATH : PAUSE_ICON_PATH;
+    if (pathEl) {
+      pathEl.setAttribute("d", targetPath);
+    } else {
+      while (this.centerPlayBtn.firstChild) {
+        this.centerPlayBtn.removeChild(this.centerPlayBtn.firstChild);
+      }
+      this.centerPlayBtn.appendChild(createPlayerSvgIcon(targetPath));
     }
   }
 
@@ -245,7 +285,7 @@ export class TouchGestureController {
     if (!target) return false;
     return Boolean(
       target.closest(
-        ".ytp-chrome-bottom, .ytp-chrome-top, .ytp-settings-menu, .ytp-popup, .ytpp-subtitle-box, .ytpp-panel-backdrop, .ytpp-touch-center-btn, button, a, input, select, textarea",
+        ".ytp-chrome-bottom, .ytp-chrome-top, .ytp-settings-menu, .ytp-popup, .ytpp-subtitle-box, .ytpp-status-interactive, .ytpp-popover, .ytpp-panel-backdrop, .ytpp-touch-center-btn, button, a, input, select, textarea",
       ),
     );
   }
@@ -303,6 +343,7 @@ export class TouchGestureController {
     });
 
     if (this.activePointers.size === 2) {
+      this.clearLongPress(player);
       this.gestureMode = "pinch";
       this.initialPinchDistance = this.getPinchDistance();
       return;
@@ -321,6 +362,34 @@ export class TouchGestureController {
           ? ytPlayer.getVolume()
           : (video?.volume ?? 1) * 100;
       this.gestureStartBrightness = this.currentBrightness;
+
+      this.clearLongPress(player);
+      this.longPressTimer = setTimeout(() => {
+        if (this.activePointers.size === 1 && this.gestureMode === "none") {
+          const v = this.getVideo(player);
+          if (v && !v.paused) {
+            this.longPressActive = true;
+            this.savedPlaybackRate = v.playbackRate || 1;
+            v.playbackRate = 2.0;
+            this.showHud(tr("2.0x 倍速播放中", "2.0x Speed"), undefined, 0);
+          }
+        }
+      }, 480);
+    }
+  }
+
+  private clearLongPress(player: HTMLElement): void {
+    if (this.longPressTimer) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+    if (this.longPressActive) {
+      this.longPressActive = false;
+      const v = this.getVideo(player);
+      if (v) {
+        v.playbackRate = this.savedPlaybackRate || 1;
+      }
+      this.hideHud();
     }
   }
 
@@ -336,10 +405,10 @@ export class TouchGestureController {
         const ratio = dist / this.initialPinchDistance;
         if (ratio > 1.18) {
           player.classList.add("ytpp-video-zoom-cover");
-          this.showHud("画面比例: 裁切铺满");
+          this.showHud(tr("画面比例: 裁切铺满", "Zoom: Fill"));
         } else if (ratio < 0.84) {
           player.classList.remove("ytpp-video-zoom-cover");
-          this.showHud("画面比例: 原始适应");
+          this.showHud(tr("画面比例: 原始适应", "Zoom: Fit"));
         }
       }
       return;
@@ -356,6 +425,7 @@ export class TouchGestureController {
 
     if (this.gestureMode === "none") {
       if (absX < 14 && absY < 14) return;
+      this.clearLongPress(player);
 
       const rect = player.getBoundingClientRect();
       if (absX > absY * 1.25) {
@@ -396,7 +466,7 @@ export class TouchGestureController {
       }
       video.muted = false;
       video.volume = nextVol / 100;
-      this.showHud(`音量 ${nextVol}%`, undefined, 800);
+      this.showHud(`${tr("音量", "Volume")} ${nextVol}%`, undefined, 800);
       return;
     }
 
@@ -408,7 +478,7 @@ export class TouchGestureController {
       );
       this.currentBrightness = nextBri;
       video.style.filter = nextBri === 100 ? "" : `brightness(${nextBri}%)`;
-      this.showHud(`亮度 ${nextBri}%`, undefined, 800);
+      this.showHud(`${tr("亮度", "Brightness")} ${nextBri}%`, undefined, 800);
     }
   }
 
@@ -417,13 +487,23 @@ export class TouchGestureController {
     if (!pt) return;
     this.activePointers.delete(e.pointerId);
 
+    if (this.longPressActive) {
+      this.clearLongPress(player);
+      return;
+    }
+    this.clearLongPress(player);
+
     const video = this.getVideo(player);
 
     if (this.gestureMode === "seek") {
       if (video) {
         video.currentTime = this.targetSeekTimeSec;
       }
-      this.showHud(`跳转至 ${formatTimeMs(this.targetSeekTimeSec * 1000)}`, undefined, 700);
+      this.showHud(
+        `${tr("跳转至", "Seek to")} ${formatTimeMs(this.targetSeekTimeSec * 1000)}`,
+        undefined,
+        700,
+      );
       this.gestureMode = "none";
       return;
     }
@@ -447,8 +527,9 @@ export class TouchGestureController {
     }
   }
 
-  private onPointerCancel(e: PointerEvent, _player: HTMLElement): void {
+  private onPointerCancel(e: PointerEvent, player: HTMLElement): void {
     this.activePointers.delete(e.pointerId);
+    this.clearLongPress(player);
     if (this.activePointers.size === 0) {
       this.gestureMode = "none";
     }
@@ -490,9 +571,7 @@ export class TouchGestureController {
     const isShown = player.classList.toggle("ytpp-touch-controls-shown");
     if (isShown) {
       const video = this.getVideo(player);
-      if (this.centerPlayBtn && video) {
-        this.centerPlayBtn.textContent = video.paused ? "▶" : "⏸";
-      }
+      this.syncCenterPlayIcon(video);
       player.classList.remove("ytp-autohide");
       this.scheduleAutoHideTouchControls(player);
     } else {
@@ -523,18 +602,18 @@ export class TouchGestureController {
 
     if (relX < 0.35) {
       video.currentTime = Math.max(0, video.currentTime - seekSec);
-      this.showHud(`快退 ${seekSec}s`);
+      this.showHud(`${tr("快退", "Rewind")} ${seekSec}s`);
     } else if (relX > 0.65) {
       const dur = Number.isFinite(video.duration) ? video.duration : video.currentTime + seekSec;
       video.currentTime = Math.min(dur, video.currentTime + seekSec);
-      this.showHud(`快进 ${seekSec}s`);
+      this.showHud(`${tr("快进", "Forward")} ${seekSec}s`);
     } else {
       if (video.paused) {
         void video.play();
-        this.showHud("播放");
+        this.showHud(tr("播放", "Play"));
       } else {
         video.pause();
-        this.showHud("暂停");
+        this.showHud(tr("暂停", "Pause"));
       }
     }
   }

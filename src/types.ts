@@ -1,4 +1,5 @@
 export type SubtitleMode = "bilingual" | "target" | "source" | "off";
+export type UiLang = "auto" | "zh" | "en";
 
 export interface Cue {
   /** 0-based sequential index in the normalized timeline */
@@ -50,12 +51,16 @@ export interface VideoMetadata {
 }
 
 export interface AppConfig {
+  /** UI interface language ("auto" | "zh" | "en") */
+  uiLang: UiLang;
   /** OpenAI-compatible API base URL (user-configured, empty by default) */
   apiBaseUrl: string;
   /** API Key for the endpoint (optional for local proxies without auth) */
   apiKey: string;
   /** Selected model ID (user-configured) */
   model: string;
+  /** Persisted list of available models fetched from the endpoint */
+  cachedModels: string[];
   /** Target translation language */
   targetLang: string;
   /** Extra custom prompt instructions (e.g. terminology or style) */
@@ -76,6 +81,10 @@ export interface AppConfig {
   subtitleBottomPercent: number;
   /** Show semi-transparent dark backdrop behind subtitles */
   subtitleBackdrop: boolean;
+  /** Subtitle backdrop opacity (0.05 to 0.95, default 0.42) */
+  subtitleBackdropOpacity: number;
+  /** Automatically translate video title and description */
+  translateMetadata: boolean;
 
   /** Performance optimizations */
   perfDisableAmbient: boolean;
@@ -89,4 +98,8 @@ export interface AppConfig {
   touchEnlargeControls: boolean;
   touchSingleTapToggleControls: boolean;
   touchDoubleTapSeekSec: number;
+
+  /** SponsorBlock integration */
+  sbEnabled: boolean;
+  sbCategories: string[];
 }

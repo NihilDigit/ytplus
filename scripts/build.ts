@@ -1,7 +1,7 @@
 import { mkdirSync, watch, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const srcDir = resolve(import.meta.dir, "../src");
 const outDir = resolve(import.meta.dir, "../dist");
 const outFile = resolve(outDir, "ytpremiumplus.user.js");

@@ -34,7 +34,12 @@ interface YtMoviePlayerElement extends HTMLElement {
   getOption?: (moduleName: string, optionName: string) => unknown;
 }
 
-type TimedTextListener = (videoId: string, url: string, payload: Json3Payload | null) => void;
+type TimedTextListener = (
+  videoId: string,
+  trackKey: string,
+  url: string,
+  payload: Json3Payload | null,
+) => void;
 
 const timedTextUrlByVideo = new Map<string, string>();
 const timedTextPayloadByVideo = new Map<string, Json3Payload>();
@@ -47,6 +52,31 @@ function extractVideoIdFromUrl(urlStr: string): string | null {
     return u.searchParams.get("v");
   } catch {
     return null;
+  }
+}
+
+function extractTrackKeyFromUrl(urlStr: string, videoId: string): string {
+  try {
+    const u = new URL(urlStr, location.origin);
+    const lang = u.searchParams.get("lang") || "";
+    const kind = u.searchParams.get("kind") || "";
+    const name = u.searchParams.get("name") || "";
+    return `${videoId}::${kind}:${lang}:${name}`;
+  } catch {
+    return videoId;
+  }
+}
+
+function makeTrackCacheKey(videoId: string, track: CaptionTrackInfo): string {
+  return extractTrackKeyFromUrl(track.baseUrl, videoId);
+}
+
+function hasTranslationParam(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl, location.origin);
+    return u.searchParams.has("tlang");
+  } catch {
+    return /[?&]tlang=/.test(rawUrl);
   }
 }
 
@@ -70,15 +100,17 @@ function recordTimedTextUrl(rawUrl: string, rawBody?: string): void {
   if (!videoId) return;
 
   const json3Url = ensureJson3Url(rawUrl);
+  const trackKey = extractTrackKeyFromUrl(rawUrl, videoId);
+  timedTextUrlByVideo.set(trackKey, json3Url);
   timedTextUrlByVideo.set(videoId, json3Url);
 
   let parsedPayload: Json3Payload | null = null;
-  if (rawBody) {
+  if (rawBody && !hasTranslationParam(rawUrl)) {
     try {
       const parsed = JSON.parse(rawBody);
       if (parsed && Array.isArray(parsed.events)) {
         parsedPayload = parsed as Json3Payload;
-        timedTextPayloadByVideo.set(videoId, parsedPayload);
+        timedTextPayloadByVideo.set(trackKey, parsedPayload);
       }
     } catch {
       // Non-json3 response; we still recorded the signed URL
@@ -87,7 +119,7 @@ function recordTimedTextUrl(rawUrl: string, rawBody?: string): void {
 
   for (const listener of timedTextListeners) {
     try {
-      listener(videoId, json3Url, parsedPayload);
+      listener(videoId, trackKey, json3Url, parsedPayload);
     } catch {
       // Ignore listener errors
     }
@@ -320,8 +352,10 @@ export async function fetchSubtitleJson3(
   videoId: string,
   track: CaptionTrackInfo,
 ): Promise<Json3Payload | null> {
-  // 1. Check if we already captured a parsed json3 payload for this video
-  const cachedPayload = timedTextPayloadByVideo.get(videoId);
+  const trackKey = makeTrackCacheKey(videoId, track);
+
+  // 1. Check if we already captured a parsed json3 payload for this exact video + track
+  const cachedPayload = timedTextPayloadByVideo.get(trackKey);
   if (cachedPayload && Array.isArray(cachedPayload.events) && cachedPayload.events.length > 0) {
     return cachedPayload;
   }
@@ -329,14 +363,16 @@ export async function fetchSubtitleJson3(
   // 2. Try direct fetch from track.baseUrl with fmt=json3
   const direct = await fetchJson3FromUrl(track.baseUrl);
   if (direct) {
+    timedTextPayloadByVideo.set(trackKey, direct);
     return direct;
   }
 
-  // 3. Try using a previously intercepted signed timedtext URL for this video
-  const capturedUrl = timedTextUrlByVideo.get(videoId);
+  // 3. Try using a previously intercepted signed timedtext URL for this exact track
+  const capturedUrl = timedTextUrlByVideo.get(trackKey);
   if (capturedUrl) {
     const fromCaptured = await fetchJson3FromUrl(capturedUrl);
     if (fromCaptured) {
+      timedTextPayloadByVideo.set(trackKey, fromCaptured);
       return fromCaptured;
     }
   }
@@ -348,13 +384,21 @@ export async function fetchSubtitleJson3(
       if (settled) return;
       settled = true;
       timedTextListeners.delete(onIntercept);
+      if (payload) {
+        timedTextPayloadByVideo.set(trackKey, payload);
+      }
       resolve(payload);
     };
 
     const timer = setTimeout(() => finish(null), 5000);
 
-    const onIntercept: TimedTextListener = async (vId, signedUrl, inlinePayload) => {
-      if (vId !== videoId) return;
+    const onIntercept: TimedTextListener = async (
+      vId,
+      interceptedTrackKey,
+      signedUrl,
+      inlinePayload,
+    ) => {
+      if (vId !== videoId || interceptedTrackKey !== trackKey) return;
       clearTimeout(timer);
       if (inlinePayload && Array.isArray(inlinePayload.events) && inlinePayload.events.length > 0) {
         finish(inlinePayload);
@@ -369,7 +413,11 @@ export async function fetchSubtitleJson3(
     try {
       const player = getPlayerElement();
       player?.loadModule?.("captions");
-      player?.setOption?.("captions", "track", { languageCode: track.languageCode });
+      player?.setOption?.("captions", "track", {
+        languageCode: track.languageCode,
+        kind: track.kind,
+        vss_id: track.vssId,
+      });
     } catch {
       // Ignore
     }

@@ -2,6 +2,8 @@ import { configStore } from "../config";
 import type { CaptionTrackInfo, Cue, VideoMetadata } from "../types";
 import { subtitleCache } from "./cache";
 import {
+  alignLyricsToAsrEvents,
+  computeCuesFingerprint,
   findActiveCueIndex,
   findCurrentOrNextCueIndex,
   parseJson3ToCues,
@@ -13,9 +15,38 @@ import {
   selectBestCaptionTrack,
 } from "./extractor";
 import { translateCueBatch } from "./llm-client";
+import {
+  fetchExternalLyricsForVideo,
+  shouldAttemptLyricsLookup,
+} from "./lyrics";
 import { SubtitleOverlay } from "./overlay";
 
 const CONTEXT_WINDOW_CUES = 4;
+const SENTENCE_END_SNAP_REGEX = /[.?!。？！…]+["')\]）】》”’]*$/;
+
+/**
+ * Extends a batch end index by up to `maxExtra` cues so the batch ends cleanly
+ * on a complete sentence boundary whenever possible, allowing the LLM to reorganize
+ * 2-4 adjacent breath-group slots of the same sentence together.
+ */
+function snapBatchEndIndex(
+  cues: Cue[],
+  startIdx: number,
+  baseCount: number,
+  maxExtra: number,
+): number {
+  if (cues.length === 0) return 0;
+  const rawLastIdx = Math.min(cues.length - 1, startIdx + baseCount - 1);
+  if (rawLastIdx >= cues.length - 1) return cues.length;
+
+  const limitIdx = Math.min(cues.length - 1, rawLastIdx + maxExtra);
+  for (let i = rawLastIdx; i <= limitIdx; i++) {
+    if (SENTENCE_END_SNAP_REGEX.test(cues[i].sourceText.trim())) {
+      return i + 1;
+    }
+  }
+  return rawLastIdx + 1;
+}
 
 export class SubtitleManager {
   private overlay = new SubtitleOverlay();
@@ -32,6 +63,7 @@ export class SubtitleManager {
 
   private pipelineAbort: AbortController | null = null;
   private pipelineGeneration = 0;
+  private trackLoadGeneration = 0;
 
   /**
    * When true, locks the video in a paused + native buffering spinner state
@@ -170,13 +202,16 @@ export class SubtitleManager {
   }
 
   private async loadTrack(videoId: string, track: CaptionTrackInfo): Promise<void> {
+    const loadGen = ++this.trackLoadGeneration;
     this.currentTrack = track;
     if (this.shouldUseBufferingLock()) {
       this.lockBuffering(true, "加载字幕...");
     }
 
     const payload = await fetchSubtitleJson3(videoId, track);
-    if (this.currentVideoId !== videoId) return;
+    if (this.currentVideoId !== videoId || this.trackLoadGeneration !== loadGen) {
+      return;
+    }
 
     if (!payload) {
       this.unlockBuffering();
@@ -185,7 +220,31 @@ export class SubtitleManager {
       return;
     }
 
-    const normalized = parseJson3ToCues(payload, track.kind);
+    const metadata = extractVideoMetadata(videoId);
+    this.metadata = metadata;
+
+    // 3-Tier Subtitle Source Waterfall:
+    // Tier 1: Creator manual captions (track.kind !== "asr")
+    // Tier 2: External lyrics site (Genius / LRCLIB) phonetically aligned onto ASR word timestamps
+    // Tier 3: ASR word stream + DP breath-group segmentation + LLM context restoration
+    let normalized: Cue[] | null = null;
+    if (shouldAttemptLyricsLookup(track, metadata, payload)) {
+      if (this.bufferingLockActive) {
+        this.overlay.setBuffering(true, "匹配歌词时间轴...");
+      }
+      const externalLyrics = await fetchExternalLyricsForVideo(metadata);
+      if (this.currentVideoId !== videoId || this.trackLoadGeneration !== loadGen) {
+        return;
+      }
+      if (externalLyrics && Array.isArray(payload.events)) {
+        normalized = alignLyricsToAsrEvents(externalLyrics, payload.events);
+      }
+    }
+
+    if (!normalized || normalized.length === 0) {
+      normalized = parseJson3ToCues(payload, track.kind);
+    }
+
     this.cues = normalized;
     this.activeCueIndex = -1;
 
@@ -199,19 +258,28 @@ export class SubtitleManager {
       const cacheKey = subtitleCache.makeKey(
         videoId,
         track.vssId || track.languageCode,
-        this.cues.length,
+        computeCuesFingerprint(normalized),
         cfg.targetLang,
         cfg.model.trim(),
       );
       const cached = await subtitleCache.get(cacheKey);
-      if (cached && this.currentVideoId === videoId) {
+      if (
+        cached &&
+        this.currentVideoId === videoId &&
+        this.trackLoadGeneration === loadGen &&
+        this.cues === normalized
+      ) {
         for (const [idxStr, translated] of Object.entries(cached)) {
           const idx = Number.parseInt(idxStr, 10);
-          if (this.cues[idx] && translated) {
-            this.cues[idx].targetText = translated;
+          if (normalized[idx] && translated) {
+            normalized[idx].targetText = translated;
           }
         }
       }
+    }
+
+    if (this.currentVideoId !== videoId || this.trackLoadGeneration !== loadGen) {
+      return;
     }
 
     this.refreshCurrentCueDisplay();
@@ -347,7 +415,7 @@ export class SubtitleManager {
     }
 
     const fastSize = Math.max(1, cfg.fastBatchSize || 10);
-    const fastEndExclusive = Math.min(this.cues.length, startIdx + fastSize);
+    const fastEndExclusive = snapBatchEndIndex(this.cues, startIdx, fastSize, 3);
     const fastWindow = this.cues.slice(startIdx, fastEndExclusive);
     const missingInFastWindow = fastWindow.filter((c) => !c.targetText);
 
@@ -387,7 +455,7 @@ export class SubtitleManager {
     const cacheKey = subtitleCache.makeKey(
       videoId,
       track.vssId || track.languageCode,
-      this.cues.length,
+      computeCuesFingerprint(this.cues),
       cfg.targetLang,
       cfg.model.trim(),
     );
@@ -468,12 +536,14 @@ export class SubtitleManager {
           break;
         }
 
+        const batchEndExclusive = snapBatchEndIndex(
+          this.cues,
+          nextUntranslated,
+          batchSize,
+          4,
+        );
         const batchCues: Cue[] = [];
-        for (
-          let i = nextUntranslated;
-          i < this.cues.length && batchCues.length < batchSize;
-          i++
-        ) {
+        for (let i = nextUntranslated; i < batchEndExclusive; i++) {
           if (!this.cues[i].targetText) {
             batchCues.push(this.cues[i]);
           } else if (batchCues.length > 0) {
@@ -551,6 +621,7 @@ export class SubtitleManager {
   }
 
   reset(): void {
+    this.trackLoadGeneration++;
     this.cancelActivePipeline(false);
     if (this.seekDebounceTimer) {
       clearTimeout(this.seekDebounceTimer);

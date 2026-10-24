@@ -15,11 +15,15 @@ class SubtitleCache {
   makeKey(
     videoId: string,
     trackId: string,
-    cueCount: number,
+    cueCountOrFingerprint: number | string,
     targetLang: string,
     model: string,
   ): string {
-    return `${videoId}::${trackId}::c${cueCount}::${targetLang}::${model}`;
+    const tag =
+      typeof cueCountOrFingerprint === "number"
+        ? `c${cueCountOrFingerprint}`
+        : cueCountOrFingerprint;
+    return `${videoId}::${trackId}::${tag}::${targetLang}::${model}`;
   }
 
   private openDb(): Promise<IDBDatabase | null> {

@@ -136,7 +136,6 @@ export class SettingsPanelUI {
   private bottomValueEl: HTMLElement | null = null;
   private backdropSliderEl: HTMLInputElement | null = null;
   private backdropValueEl: HTMLElement | null = null;
-  private brandPillEl: HTMLElement | null = null;
 
   constructor(subtitleManager: SubtitleManager) {
     this.subtitleManager = subtitleManager;
@@ -234,7 +233,7 @@ export class SettingsPanelUI {
         display: block !important;
       }
 
-      /* Anchored glassmorphic popover inside #movie_player (works in Fullscreen & Theater mode) */
+      /* Anchored popover inside #movie_player (works in Fullscreen & Theater mode, zero per-frame backdrop-filter GPU blur) */
       .ytpp-popover {
         position: absolute;
         right: 12px;
@@ -245,11 +244,9 @@ export class SettingsPanelUI {
         max-height: calc(100% - 76px);
         display: flex;
         flex-direction: column;
-        background: rgba(18, 18, 22, 0.92);
-        backdrop-filter: blur(24px) saturate(150%);
-        -webkit-backdrop-filter: blur(24px) saturate(150%);
-        border: 1px solid rgba(255, 255, 255, 0.11);
-        border-radius: 16px;
+        background: rgba(16, 16, 20, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 14px;
         color: #f3f3f5;
         box-shadow: 0 16px 48px rgba(0, 0, 0, 0.68), 0 0 0 1px rgba(0, 0, 0, 0.4);
         font-family: "YouTube Sans", Roboto, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif;
@@ -304,16 +301,6 @@ export class SettingsPanelUI {
         width: 18px;
         height: 18px;
         flex-shrink: 0;
-      }
-
-      .ytpp-brand-pill {
-        font-size: 11px;
-        font-weight: 500;
-        color: rgba(255, 255, 255, 0.72);
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        padding: 2px 8px;
-        border-radius: 999px;
       }
 
       .ytpp-tabs {
@@ -708,10 +695,6 @@ export class SettingsPanelUI {
 
     for (const [mode, btn] of this.modeButtons.entries()) {
       btn.classList.toggle("ytpp-active", cfg.subtitleMode === mode);
-    }
-
-    if (this.brandPillEl) {
-      this.brandPillEl.textContent = getModeLabel(cfg.subtitleMode);
     }
 
     if (this.fontSliderEl && document.activeElement !== this.fontSliderEl) {
@@ -1308,17 +1291,12 @@ export class SettingsPanelUI {
         el("div", { className: "ytpp-card" }, [
           el("span", {
             className: "ytpp-sublabel",
-            text: tr("平板与触控手势", "Tablet & Touch Gestures"),
+            text: tr("播放器触屏模式", "Player Touch Mode"),
           }),
           makeSwitchRow(
-            tr("启用触屏快进/音量/亮度/倍速手势", "Touch Swipe Seek / Volume / Brightness / 2x"),
+            tr("启用播放器触屏模式 (单击展面板/双击暂停/滑动进度)", "Enable Touch Player Mode (Tap UI / Double-Tap Pause / Swipe Seek)"),
             cfg.touchGesturesEnabled,
             (val) => configStore.update({ touchGesturesEnabled: val }),
-          ),
-          makeSwitchRow(
-            tr("触屏单击画面仅开关控制栏", "Single Tap Video to Toggle Controls"),
-            cfg.touchSingleTapToggleControls,
-            (val) => configStore.update({ touchSingleTapToggleControls: val }),
           ),
           makeSwitchRow(
             tr("加宽进度条与操作按钮触控热区", "Enlarge Scrubber & Control Hitboxes"),
@@ -1364,11 +1342,6 @@ export class SettingsPanelUI {
     const brandIconSvg = createYtPlusSvgIcon(null);
     brandIconSvg.setAttribute("viewBox", "0 0 24 24");
 
-    this.brandPillEl = el("span", {
-      className: "ytpp-brand-pill",
-      text: getModeLabel(cfg.subtitleMode),
-    });
-
     const langToggleBtn = el("button", {
       className: "ytpp-value-badge",
       text: isEn() ? "中文" : "EN",
@@ -1401,10 +1374,7 @@ export class SettingsPanelUI {
               brandIconSvg,
               el("span", { text: "YT+" }),
             ]),
-            el("div", { className: "ytpp-inline-group" }, [
-              this.brandPillEl,
-              langToggleBtn,
-            ]),
+            langToggleBtn,
           ]),
           el("div", { className: "ytpp-tabs" }, [
             makeTabBtn("subtitle", tr("字幕", "Subtitles")),

@@ -61,7 +61,7 @@ export class SubtitleManager {
   private activeCueIndex = -1;
 
   private videoEl: HTMLVideoElement | null = null;
-  private rafId: number | null = null;
+  private boundaryTimer: ReturnType<typeof setTimeout> | null = null;
   private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   private pipelineAbort: AbortController | null = null;
@@ -314,43 +314,68 @@ export class SubtitleManager {
     video.addEventListener("timeupdate", this.onTimeUpdate);
     video.addEventListener("play", this.onPlay);
     video.addEventListener("playing", this.onPlay);
+    video.addEventListener("pause", this.onPause);
+    video.addEventListener("ratechange", this.onRateChange);
     video.addEventListener("seeking", this.onSeeking);
     video.addEventListener("seeked", this.onSeeked);
-    this.startSyncLoop();
+    this.scheduleNextBoundarySync();
   }
 
   private unbindVideoEvents(): void {
-    this.stopSyncLoop();
+    this.clearBoundaryTimer();
     if (!this.videoEl) return;
     this.videoEl.removeEventListener("timeupdate", this.onTimeUpdate);
     this.videoEl.removeEventListener("play", this.onPlay);
     this.videoEl.removeEventListener("playing", this.onPlay);
+    this.videoEl.removeEventListener("pause", this.onPause);
+    this.videoEl.removeEventListener("ratechange", this.onRateChange);
     this.videoEl.removeEventListener("seeking", this.onSeeking);
     this.videoEl.removeEventListener("seeked", this.onSeeked);
     this.videoEl = null;
   }
 
-  private startSyncLoop(): void {
-    this.stopSyncLoop();
-    const tick = () => {
-      if (this.videoEl) {
-        if (this.bufferingLockActive && !this.videoEl.paused) {
-          this.lastInternalPauseAt = performance.now();
-          this.videoEl.pause();
-        } else if (!this.videoEl.paused) {
-          this.syncCueAtTime(this.videoEl.currentTime * 1000);
-        }
-      }
-      this.rafId = requestAnimationFrame(tick);
-    };
-    this.rafId = requestAnimationFrame(tick);
+  private clearBoundaryTimer(): void {
+    if (this.boundaryTimer !== null) {
+      clearTimeout(this.boundaryTimer);
+      this.boundaryTimer = null;
+    }
   }
 
-  private stopSyncLoop(): void {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
+  private scheduleNextBoundarySync(): void {
+    this.clearBoundaryTimer();
+    if (!this.videoEl || this.videoEl.paused || this.cues.length === 0) {
+      return;
     }
+
+    const timeMs = this.videoEl.currentTime * 1000;
+    const idx = this.activeCueIndex;
+    let nextBoundaryMs = -1;
+
+    if (idx >= 0 && idx < this.cues.length) {
+      const activeCue = this.cues[idx];
+      if (timeMs < activeCue.endMs) {
+        nextBoundaryMs = activeCue.endMs;
+      } else if (idx + 1 < this.cues.length) {
+        nextBoundaryMs = this.cues[idx + 1].startMs;
+      }
+    } else {
+      const nextIdx = findCurrentOrNextCueIndex(this.cues, timeMs);
+      if (nextIdx >= 0) {
+        nextBoundaryMs = this.cues[nextIdx].startMs;
+      }
+    }
+
+    if (nextBoundaryMs <= timeMs) {
+      return;
+    }
+
+    const rate = Math.max(0.25, this.videoEl.playbackRate || 1);
+    const waitMs = Math.min(1000, Math.max(12, (nextBoundaryMs - timeMs) / rate + 4));
+    this.boundaryTimer = setTimeout(() => {
+      this.boundaryTimer = null;
+      if (!this.videoEl) return;
+      this.syncCueAtTime(this.videoEl.currentTime * 1000);
+    }, waitMs);
   }
 
   private onTimeUpdate = (): void => {
@@ -363,7 +388,19 @@ export class SubtitleManager {
       this.resumePlayAfterUnlock = true;
       this.lastInternalPauseAt = performance.now();
       this.videoEl.pause();
+      return;
     }
+    if (this.videoEl) {
+      this.syncCueAtTime(this.videoEl.currentTime * 1000);
+    }
+  };
+
+  private onPause = (): void => {
+    this.clearBoundaryTimer();
+  };
+
+  private onRateChange = (): void => {
+    this.scheduleNextBoundarySync();
   };
 
   private onSeeking = (): void => {
@@ -384,8 +421,7 @@ export class SubtitleManager {
         const fastEndExclusive = snapBatchEndIndex(this.cues, startIdx, fastSize, 3);
         const fastWindow = this.cues.slice(startIdx, fastEndExclusive);
         if (fastWindow.some((c) => !c.targetText)) {
-          const total = fastWindow.filter((c) => !c.targetText).length;
-          this.lockBuffering(true, `${tr("正在预翻字幕", "Translating")} 0/${total}`);
+          this.lockBuffering(true, tr("正在翻译字幕...", "Translating captions..."));
         }
       }
     }
@@ -404,6 +440,7 @@ export class SubtitleManager {
       this.activeCueIndex = idx;
       this.overlay.renderCue(idx >= 0 ? this.cues[idx] : null);
     }
+    this.scheduleNextBoundarySync();
   }
 
   private refreshCurrentCueDisplay(): void {
@@ -411,6 +448,7 @@ export class SubtitleManager {
     const idx = findActiveCueIndex(this.cues, this.videoEl.currentTime * 1000);
     this.activeCueIndex = idx;
     this.overlay.renderCue(idx >= 0 ? this.cues[idx] : null);
+    this.scheduleNextBoundarySync();
   }
 
   private scheduleFromCursor(trigger: "initial" | "seek"): void {
@@ -484,12 +522,10 @@ export class SubtitleManager {
     const metadata = this.metadata || extractVideoMetadata(videoId);
 
     try {
-      // Stage 1: Fast Batch with YouTube-style center buffering indicator & progress bar
+      // Stage 1: Fast Batch with clean unified pill indicator
       if (missingFastCues.length > 0) {
-        const totalFast = missingFastCues.length;
-        let completedInFast = 0;
         this.fastBatchRunning = true;
-        this.fastBatchStatusText = `${tr("正在预翻字幕", "Translating")} 0/${totalFast}`;
+        this.fastBatchStatusText = tr("正在翻译字幕...", "Translating captions...");
 
         if (cfg.holdPlaybackForFastBatch) {
           this.lockBuffering(trigger === "initial", this.fastBatchStatusText);
@@ -515,13 +551,6 @@ export class SubtitleManager {
             if (this.cues[cueIdx]) {
               this.cues[cueIdx].targetText = text;
               partialCache[cueIdx] = text;
-              completedInFast++;
-              this.fastBatchStatusText = `${tr("正在预翻字幕", "Translating")} ${Math.min(completedInFast, totalFast)}/${totalFast}`;
-              if (this.bufferingLockActive) {
-                this.overlay.setBuffering(true, this.fastBatchStatusText);
-              } else {
-                this.overlay.setStatus(this.fastBatchStatusText);
-              }
               if (cueIdx === this.activeCueIndex) {
                 this.overlay.renderCue(this.cues[cueIdx]);
               }
@@ -536,6 +565,7 @@ export class SubtitleManager {
         }
 
         this.fastBatchRunning = false;
+        this.overlay.setStatus(null);
         this.refreshCurrentCueDisplay();
         this.unlockBuffering();
       } else {

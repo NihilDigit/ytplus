@@ -6,7 +6,8 @@ const srcDir = resolve(import.meta.dir, "../src");
 const outDir = resolve(import.meta.dir, "../dist");
 const outFile = resolve(outDir, "ytplus.user.js");
 const legacyOutFile = resolve(outDir, "ytpremiumplus.user.js");
-const devLoaderFile = resolve(outDir, "ytpremiumplus.dev.user.js");
+const devLoaderFile = resolve(outDir, "ytplus.dev.user.js");
+const legacyDevLoaderFile = resolve(outDir, "ytpremiumplus.dev.user.js");
 const fileUrl = `file:///${outFile.replace(/\\/g, "/")}`;
 
 function createHeader(extraLines: string[] = []): string {
@@ -68,11 +69,9 @@ async function buildOnce(): Promise<boolean> {
 
   // 2. Lightweight @require file:// loader for Tampermonkey instant local hot-reload
   const devHeader = createHeader([`// @require      ${fileUrl}`]);
-  writeFileSync(
-    devLoaderFile,
-    `${devHeader}\n// Dev loader: actual bundle is loaded via @require from ${fileUrl}\n`,
-    "utf8",
-  );
+  const devContent = `${devHeader}\n// Dev loader: actual bundle is loaded via @require from ${fileUrl}\n`;
+  writeFileSync(devLoaderFile, devContent, "utf8");
+  writeFileSync(legacyDevLoaderFile, devContent, "utf8");
 
   console.log(
     `[build] Built -> ${outFile} (${(body.length / 1024).toFixed(1)} KB) & ${devLoaderFile}`,
@@ -92,7 +91,11 @@ if (isServe) {
     port,
     fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/ytpremiumplus.user.js" || url.pathname === "/") {
+      if (
+        url.pathname === "/ytplus.user.js" ||
+        url.pathname === "/ytpremiumplus.user.js" ||
+        url.pathname === "/"
+      ) {
         return new Response(Bun.file(outFile), {
           headers: {
             "Content-Type": "text/javascript; charset=utf-8",
@@ -103,7 +106,7 @@ if (isServe) {
       return new Response("Not Found", { status: 404 });
     },
   });
-  console.log(`[serve] Local Userscript URL: http://127.0.0.1:${port}/ytpremiumplus.user.js`);
+  console.log(`[serve] Local Userscript URL: http://127.0.0.1:${port}/ytplus.user.js`);
 }
 
 if (isWatch) {

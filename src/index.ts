@@ -1,5 +1,6 @@
 import { PerformanceOptimizer } from "./perf/optimizer";
 import { SponsorBlockManager } from "./sponsorblock/manager";
+import { CommentTranslator } from "./subtitle/comment-translator";
 import { getCurrentVideoId, installTimedTextInterceptor } from "./subtitle/extractor";
 import { SubtitleManager } from "./subtitle/manager";
 import { TouchGestureController } from "./touch/gestures";
@@ -18,11 +19,13 @@ function bootstrap(): void {
   const perfOptimizer = new PerformanceOptimizer();
   const subtitleManager = new SubtitleManager();
   const sponsorBlock = new SponsorBlockManager();
+  const commentTranslator = new CommentTranslator();
   const touchController = new TouchGestureController(subtitleManager);
   const settingsUI = new SettingsPanelUI(subtitleManager);
 
   const onReady = () => {
     perfOptimizer.init();
+    commentTranslator.init();
     touchController.init();
     syncWatchPage();
   };

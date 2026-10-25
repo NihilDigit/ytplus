@@ -203,19 +203,20 @@ export class SponsorBlockManager {
         z-index: 85;
         display: none;
         align-items: center;
-        gap: 10px;
+        gap: 9px;
         padding: 6px 12px;
-        border-radius: 8px;
-        background: rgba(24, 24, 24, 0.9);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
+        border-radius: 10px;
+        background: rgba(16, 16, 20, 0.92);
         border: 1px solid rgba(255, 255, 255, 0.12);
-        color: #f1f1f1;
-        font-family: "YouTube Noto", Roboto, Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: #f3f3f5;
+        font-family: "YouTube Sans", Roboto, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif;
         font-size: 12.5px;
-        line-height: 1.3;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.35;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
         user-select: none;
+        -webkit-font-smoothing: antialiased;
       }
 
       #movie_player.ytp-big-mode .ytpp-sb-toast,
@@ -229,27 +230,30 @@ export class SponsorBlockManager {
       }
 
       .ytpp-sb-dot {
-        width: 8px;
-        height: 8px;
+        width: 7px;
+        height: 7px;
         border-radius: 50%;
         flex-shrink: 0;
       }
 
       .ytpp-sb-undo-btn {
-        border: none;
-        border-radius: 5px;
-        background: rgba(255, 255, 255, 0.14);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.1);
         color: #ffffff;
         font-size: 11.5px;
         font-weight: 500;
+        line-height: 1.2;
         font-family: inherit;
-        padding: 3px 8px;
+        padding: 3px 9px;
         cursor: pointer;
-        transition: background 0.12s ease;
+        flex-shrink: 0;
+        transition: background 0.14s ease, border-color 0.14s ease;
       }
 
       .ytpp-sb-undo-btn:hover {
-        background: rgba(255, 255, 255, 0.25);
+        background: rgba(255, 255, 255, 0.2);
+        border-color: rgba(255, 255, 255, 0.28);
       }
       `,
     );

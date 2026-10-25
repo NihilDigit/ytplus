@@ -265,13 +265,19 @@ export function extractVideoMetadata(videoId: string): VideoMetadata {
   const player = getPlayerElement();
   const videoData = player?.getVideoData?.();
 
+  const domTitleEl = document.querySelector<HTMLElement>(
+    "ytd-watch-metadata #title h1 yt-formatted-string, #above-the-fold #title h1 yt-formatted-string",
+  );
   const domTitle =
-    document.querySelector("ytd-watch-metadata h1 yt-formatted-string")?.textContent?.trim() ||
+    domTitleEl?.textContent?.trim() ||
     document.title.replace(/\s*-\s*YouTube$/, "").trim();
   const domAuthor =
     document.querySelector("ytd-watch-metadata ytd-channel-name a")?.textContent?.trim() || "";
-  const domDesc =
-    document.querySelector("#description-inline-expander")?.textContent?.trim() || "";
+
+  const domDescSnippet = document.querySelector<HTMLElement>(
+    "#description-inline-expander #expanded yt-attributed-string, #description-inline-expander #attributed-snippet-text, #description-inline-expander #plain-snippet-text, #description-inline-expander yt-attributed-string",
+  );
+  const domDesc = domDescSnippet?.textContent?.trim() || "";
 
   return {
     videoId,

@@ -418,12 +418,12 @@ export async function translateVideoMetadata(
     headers.Authorization = `Bearer ${config.apiKey.trim()}`;
   }
 
-  const descTrimmed = (metadata.description || "").trim().slice(0, 1800);
+  const descTrimmed = (metadata.description || "").trim().slice(0, 2600);
   const sysPrompt = [
     `你是一位资深视频编辑与本地化译者。请将输入的 YouTube 视频标题和简介翻译为自然、准确、符合母语习惯的${config.targetLang}。`,
     "请严格按以下 XML 标签格式输出，不要输出任何额外说明或代码块标记：",
     "<title>翻译后的标题</title>",
-    "<description>翻译后的简介（保留原有段落结构、时间轴锚点与核心信息）</description>",
+    "<description>翻译后的简介（保留原有段落结构、网址链接、时间轴锚点与核心信息）</description>",
   ].join("\n");
 
   const userPrompt = [
@@ -491,10 +491,21 @@ export async function translateVideoMetadata(
   const { fullContent } = extractContentFromResponseText(rawText);
   if (!fullContent) return null;
 
-  const titleMatch = /<title>([\s\S]*?)<\/title>/i.exec(fullContent);
-  const descMatch = /<description>([\s\S]*?)<\/description>/i.exec(fullContent);
-  const translatedTitle = (titleMatch ? titleMatch[1] : "").trim();
-  const translatedDesc = (descMatch ? descMatch[1] : "").trim();
+  const extractTag = (tag: string): string => {
+    const closed = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i").exec(fullContent);
+    if (closed) return closed[1].trim();
+    const openOnly = new RegExp(`<${tag}>([\\s\\S]*)$`, "i").exec(fullContent);
+    if (openOnly) {
+      return openOnly[1].replace(/<\/?[a-z_]+>[\s\S]*$/i, "").trim();
+    }
+    return "";
+  };
+
+  const translatedTitle = extractTag("title");
+  let translatedDesc = extractTag("description");
+  if (!translatedTitle && !translatedDesc && !fullContent.includes("<")) {
+    translatedDesc = fullContent.trim();
+  }
   if (!translatedTitle && !translatedDesc) {
     return null;
   }
@@ -503,4 +514,100 @@ export async function translateVideoMetadata(
     title: translatedTitle,
     description: translatedDesc,
   };
+}
+
+export async function translateCommentText(
+  config: AppConfig,
+  commentText: string,
+  metadata?: VideoMetadata | null,
+  signal?: AbortSignal,
+): Promise<string> {
+  const base = normalizeBaseUrl(config.apiBaseUrl);
+  if (!base) {
+    throw new Error("请先在 YT+ 中配置 API Base URL");
+  }
+  if (!config.model.trim()) {
+    throw new Error("请先在 YT+ 中选择翻译模型");
+  }
+  const trimmed = commentText.trim();
+  if (!trimmed) return "";
+
+  const url = `${base}/chat/completions`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+  };
+  if (config.apiKey.trim()) {
+    headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+  }
+
+  const sysPrompt = [
+    `你是一位熟悉互联网与 YouTube 社区文化的资深译者。请将输入的网友评论翻译为自然、传神、符合母语口语习惯的${config.targetLang}。`,
+    "保留原有的分段、时间轴锚点、Emoji 与玩梗语气，直接输出翻译后的正文，不要输出任何额外说明或包裹标签。",
+  ].join("\n");
+
+  const userParts: string[] = [];
+  if (metadata?.title) {
+    userParts.push(`<video_title>${metadata.title}</video_title>`);
+  }
+  userParts.push(trimmed.slice(0, 3000));
+
+  const requestBody = JSON.stringify({
+    model: config.model.trim(),
+    messages: [
+      { role: "system", content: sysPrompt },
+      { role: "user", content: userParts.join("\n\n") },
+    ],
+    temperature: 0.25,
+    stream: false,
+  });
+
+  const rawText = await new Promise<string>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+
+    if (typeof GM_xmlhttpRequest === "function") {
+      const handle = GM_xmlhttpRequest({
+        method: "POST",
+        url,
+        headers,
+        data: requestBody,
+        timeout: 35000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            resolve(res.responseText);
+          } else {
+            reject(new Error(`HTTP ${res.status}`));
+          }
+        },
+        onerror: () => reject(new Error("网络请求出错")),
+        ontimeout: () => reject(new Error("请求超时")),
+      });
+
+      if (signal) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            handle.abort?.();
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      }
+      return;
+    }
+
+    fetch(url, { method: "POST", headers, body: requestBody, signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.text();
+      })
+      .then(resolve)
+      .catch(reject);
+  });
+
+  const { fullContent } = extractContentFromResponseText(rawText);
+  return fullContent.trim();
 }

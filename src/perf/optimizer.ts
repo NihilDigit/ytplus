@@ -4,12 +4,12 @@ import { removeStyle, upsertStyle } from "../utils/dom";
 const PERF_STYLE_ID = "ytpp-perf-optimizer-style";
 
 export class PerformanceOptimizer {
-  private observer: MutationObserver | null = null;
+  private cleanTimer: ReturnType<typeof setTimeout> | null = null;
 
   init(): void {
     this.apply();
     configStore.subscribe(() => this.apply());
-    this.startDomCleaner();
+    this.bindLifecycleCleaner();
   }
 
   apply(): void {
@@ -18,15 +18,39 @@ export class PerformanceOptimizer {
 
     if (cfg.perfDisableAmbient) {
       rules.push(`
-        /* Kill YouTube Ambient Mode (Cinematics GPU blur canvas) */
+        /* Kill YouTube Ambient Mode (Cinematics GPU blur canvas & blurred background thumbnails) */
         #cinematics,
         #cinematics-container,
         .ytp-cinematics-container,
-        ytd-watch-flexy #cinematics {
+        ytd-watch-flexy #cinematics,
+        .player-container-background,
+        ytd-thumbnail.player-container-background-image,
+        yt-light-shape,
+        .contribYtLightShapeHost,
+        .contribYtLightShapeStaticWashLight {
           display: none !important;
           visibility: hidden !important;
           opacity: 0 !important;
+          filter: none !important;
           pointer-events: none !important;
+        }
+
+        /* Eliminate 500+ redundant compositor layers and SVG alpha convolution filters */
+        yt-touch-feedback-shape .ytSpecTouchFeedbackShapeStroke,
+        yt-touch-feedback-shape .ytSpecTouchFeedbackShapeFill,
+        yt-touch-feedback-shape .ytSpecTouchFeedbackShapeHoverEffect,
+        yt-interaction .stroke,
+        yt-interaction .fill,
+        .ytp-videowall-still-info-content,
+        .ytp-modern-videowall-still-info-content,
+        ytd-miniplayer {
+          will-change: auto !important;
+        }
+
+        #movie_player svg,
+        #movie_player path,
+        #movie_player .ytp-volume-slider-handle {
+          filter: none !important;
         }
       `);
       this.purgeCinematicsCanvas();
@@ -66,6 +90,9 @@ export class PerformanceOptimizer {
           content-visibility: auto;
           contain-intrinsic-size: auto 210px;
         }
+        ytd-engagement-panel-section-list-renderer:not([visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"]) {
+          content-visibility: hidden;
+        }
       `);
     }
 
@@ -83,7 +110,9 @@ export class PerformanceOptimizer {
     if (cfg.perfHideEndscreen) {
       rules.push(`
         .ytp-ce-element,
-        .ytp-cards-teaser {
+        .ytp-cards-teaser,
+        .ytp-endscreen-content,
+        .ytp-videowall-still {
           display: none !important;
         }
       `);
@@ -119,27 +148,25 @@ export class PerformanceOptimizer {
     }
   }
 
-  private startDomCleaner(): void {
-    if (this.observer) return;
-    const attach = () => {
-      if (!document.body) {
-        requestAnimationFrame(attach);
-        return;
+  private runCleanupPass = (): void => {
+    if (this.cleanTimer) {
+      clearTimeout(this.cleanTimer);
+    }
+    this.cleanTimer = setTimeout(() => {
+      this.cleanTimer = null;
+      const cfg = configStore.get();
+      if (cfg.perfDisableAmbient) {
+        this.purgeCinematicsCanvas();
       }
-      this.observer = new MutationObserver(() => {
-        const cfg = configStore.get();
-        if (cfg.perfDisableAmbient) {
-          this.purgeCinematicsCanvas();
-        }
-        if (cfg.perfDisableInlinePreview) {
-          this.stopInlinePreviewVideo();
-        }
-      });
-      this.observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-      });
-    };
-    attach();
+      if (cfg.perfDisableInlinePreview) {
+        this.stopInlinePreviewVideo();
+      }
+    }, 200);
+  };
+
+  private bindLifecycleCleaner(): void {
+    window.addEventListener("yt-navigate-finish", this.runCleanupPass);
+    window.addEventListener("yt-page-data-updated", this.runCleanupPass);
+    this.runCleanupPass();
   }
 }

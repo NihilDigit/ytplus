@@ -1,18 +1,20 @@
 import { configStore } from "../config";
 import { tr } from "../i18n";
 import type { SubtitleManager } from "../subtitle/manager";
-import { el, formatTimeMs, removeStyle, upsertStyle } from "../utils/dom";
+import { clearChildren, el, formatTimeMs, removeStyle, upsertStyle } from "../utils/dom";
 
 const TOUCH_STYLE_ID = "ytpp-touch-adaptation-style";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const PLAY_ICON_PATH = "M8 5v14l11-7z";
 const PAUSE_ICON_PATH = "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
+const REWIND_ICON_PATH = "M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z";
+const FORWARD_ICON_PATH = "M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z";
 
-function createPlayerSvgIcon(pathD: string): SVGSVGElement {
+function createPlayerSvgIcon(pathD: string, size = 28): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("width", "28");
-  svg.setAttribute("height", "28");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
   const path = document.createElementNS(SVG_NS, "path");
   path.setAttribute("d", pathD);
   path.setAttribute("fill", "#ffffff");
@@ -25,6 +27,7 @@ interface YtPlayerWithVolume extends HTMLElement {
   setVolume?: (vol: number) => void;
   unMute?: () => void;
   isMuted?: () => boolean;
+  toggleFullscreen?: () => void;
 }
 
 interface ActivePointer {
@@ -38,12 +41,20 @@ interface ActivePointer {
 export class TouchGestureController {
   private subtitleManager: SubtitleManager;
   private hudEl: HTMLElement | null = null;
+  private surfaceEl: HTMLElement | null = null;
+  private centerClusterEl: HTMLElement | null = null;
   private centerPlayBtn: HTMLElement | null = null;
   private hudHideTimer: ReturnType<typeof setTimeout> | null = null;
   private controlsHideTimer: ReturnType<typeof setTimeout> | null = null;
 
   private activePointers = new Map<number, ActivePointer>();
-  private gestureMode: "none" | "seek" | "volume" | "brightness" | "pinch" = "none";
+  private gestureMode:
+    | "none"
+    | "seek"
+    | "volume"
+    | "brightness"
+    | "fullscreen"
+    | "pinch" = "none";
 
   private seekStartTimeSec = 0;
   private targetSeekTimeSec = 0;
@@ -66,121 +77,166 @@ export class TouchGestureController {
 
   init(): void {
     this.applyStyles();
-    configStore.subscribe(() => this.applyStyles());
+    configStore.subscribe((cfg) => {
+      this.applyStyles();
+      const player = document.getElementById("movie_player");
+      if (player) {
+        player.classList.toggle("ytpp-touch-mode-enabled", cfg.touchGesturesEnabled);
+        if (!cfg.touchGesturesEnabled) {
+          player.classList.remove("ytpp-touch-controls-shown");
+        }
+      }
+    });
   }
 
   attachToPlayer(player: HTMLElement): void {
-    if (player.dataset.ytppTouchBound === "1") {
-      return;
-    }
-    player.dataset.ytppTouchBound = "1";
-
+    const cfg = configStore.get();
+    player.classList.toggle("ytpp-touch-mode-enabled", cfg.touchGesturesEnabled);
     this.mountHudAndCenterControls(player);
-
-    // Use capture phase so we can cleanly intercept touch taps before YouTube's mouse-oriented handlers
-    player.addEventListener("pointerdown", (e) => this.onPointerDown(e, player), {
-      capture: true,
-    });
-    player.addEventListener("pointermove", (e) => this.onPointerMove(e, player), {
-      capture: true,
-    });
-    player.addEventListener("pointerup", (e) => this.onPointerUp(e, player), {
-      capture: true,
-    });
-    player.addEventListener("pointercancel", (e) => this.onPointerCancel(e, player), {
-      capture: true,
-    });
-
-    // Prevent YouTube's default click-to-pause on touch devices when our gesture layer handles taps
-    player.addEventListener(
-      "click",
-      (e: MouseEvent) => {
-        const cfg = configStore.get();
-        if (!cfg.touchGesturesEnabled) return;
-        const sourceCapabilities = (e as unknown as { sourceCapabilities?: { firesTouchEvents?: boolean } })
-          .sourceCapabilities;
-        const isTouchClick =
-          player.dataset.ytppLastPointerType === "touch" ||
-          player.dataset.ytppLastPointerType === "pen" ||
-          Boolean(sourceCapabilities?.firesTouchEvents);
-
-        if (!isTouchClick) return;
-        if (this.isInteractiveControl(e.target as Element | null)) return;
-
-        if (cfg.touchSingleTapToggleControls) {
-          e.stopPropagation();
-          e.preventDefault();
-        }
-      },
-      { capture: true },
-    );
   }
 
   private applyStyles(): void {
     const cfg = configStore.get();
     const rules: string[] = [
       `
+      /* Dedicated gesture surface sitting above <video> (z-index: 15) and below subtitles (70) & chrome (60) */
+      .ytpp-touch-surface {
+        position: absolute;
+        inset: 0;
+        z-index: 15;
+        display: none;
+        touch-action: none !important;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        background: transparent;
+      }
+
+      #movie_player.ytpp-touch-mode-enabled .ytpp-touch-surface {
+        display: block;
+      }
+
+      /* Hide YouTube's desktop center play/pause flash bezel & native center play button when touch player mode is enabled */
+      #movie_player.ytpp-touch-mode-enabled .ytp-bezel-text-hide,
+      #movie_player.ytpp-touch-mode-enabled .ytp-bezel,
+      #movie_player.ytpp-touch-mode-enabled .ytp-bezel-text-wrapper,
+      #movie_player.ytpp-touch-mode-enabled .ytp-large-play-button,
+      #movie_player.ytpp-touch-mode-enabled .ytp-large-play-button-bg,
+      #movie_player.ytpp-touch-mode-enabled .ytp-cued-thumbnail-overlay .ytp-large-play-button {
+        display: none !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+
       .ytpp-gesture-hud {
         position: absolute;
         top: 12%;
         left: 50%;
         transform: translateX(-50%);
         z-index: 75;
-        padding: 6px 14px;
-        border-radius: 4px;
-        background: rgba(28, 28, 28, 0.9);
-        color: #f1f1f1;
-        font-family: Roboto, Arial, sans-serif;
-        font-size: 13px;
+        padding: 6px 12px;
+        border-radius: 10px;
+        background: rgba(16, 16, 20, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+        color: #f3f3f5;
+        font-family: "YouTube Sans", Roboto, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif;
+        font-size: 12.5px;
         font-weight: 500;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.35;
         text-align: center;
         pointer-events: none;
         user-select: none;
         opacity: 0;
         transition: opacity 0.12s ease;
         max-width: 80%;
+        -webkit-font-smoothing: antialiased;
       }
       .ytpp-gesture-hud.ytpp-visible {
         opacity: 1;
       }
       .ytpp-gesture-hud-sub {
         margin-top: 2px;
-        font-size: 12px;
+        font-size: 11.5px;
         font-weight: 400;
-        color: #aaaaaa;
+        color: rgba(255, 255, 255, 0.65);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .ytpp-touch-center-btn {
+
+      /* Mobile-style center 3-button cluster (Rewind 10s / Play-Pause / Forward 10s) */
+      .ytpp-touch-center-cluster {
         position: absolute;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
         z-index: 68;
-        width: 56px;
-        height: 56px;
-        border-radius: 50%;
-        background: rgba(0, 0, 0, 0.6);
-        border: none;
-        color: #ffffff;
-        font-size: 22px;
         display: none;
+        align-items: center;
+        gap: 36px;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      #movie_player.ytpp-touch-controls-shown .ytpp-touch-center-cluster,
+      #movie_player.ytpp-touch-mode-enabled.unstarted-mode:not(.ytpp-buffering) .ytpp-touch-center-cluster,
+      #movie_player.ytpp-touch-mode-enabled.cued-mode:not(.ytpp-buffering) .ytpp-touch-center-cluster {
+        display: flex;
+      }
+
+      .ytpp-touch-center-btn,
+      .ytpp-touch-step-btn {
+        pointer-events: auto;
+        border-radius: 50%;
+        background: rgba(16, 16, 20, 0.68);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: #ffffff;
+        display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
         user-select: none;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+        transition: transform 0.12s ease, background 0.12s ease;
       }
-      #movie_player.ytpp-touch-controls-shown .ytpp-touch-center-btn {
-        display: flex;
+
+      .ytpp-touch-center-btn {
+        width: 60px;
+        height: 60px;
       }
+
+      .ytpp-touch-step-btn {
+        width: 46px;
+        height: 46px;
+      }
+
+      .ytpp-touch-center-btn:active,
+      .ytpp-touch-step-btn:active {
+        transform: scale(0.92);
+        background: rgba(32, 32, 38, 0.85);
+      }
+
+      /* When touch mode is enabled and controls are NOT shown, force bottom/top bars hidden even if fake hover lingers */
+      #movie_player.ytpp-touch-mode-enabled:not(.ytpp-touch-controls-shown):not(.ytpp-popover-open):not(.paused-mode) .ytp-chrome-bottom,
+      #movie_player.ytpp-touch-mode-enabled:not(.ytpp-touch-controls-shown):not(.ytpp-popover-open):not(.paused-mode) .ytp-gradient-bottom,
+      #movie_player.ytpp-touch-mode-enabled:not(.ytpp-touch-controls-shown):not(.ytpp-popover-open):not(.paused-mode) .ytp-chrome-top,
+      #movie_player.ytpp-touch-mode-enabled:not(.ytpp-touch-controls-shown):not(.ytpp-popover-open):not(.paused-mode) .ytp-gradient-top {
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+
+      /* When touch controls ARE shown, force bottom/top bars visible and interactive */
       #movie_player.ytpp-touch-controls-shown .ytp-chrome-bottom,
       #movie_player.ytpp-touch-controls-shown .ytp-gradient-bottom,
       #movie_player.ytpp-touch-controls-shown .ytp-chrome-top,
       #movie_player.ytpp-touch-controls-shown .ytp-gradient-top {
         opacity: 1 !important;
         display: block !important;
+        pointer-events: auto !important;
       }
+
       #movie_player.ytpp-video-zoom-cover video.html5-main-video {
         object-fit: cover !important;
       }
@@ -196,7 +252,7 @@ export class TouchGestureController {
         }
         @media (pointer: coarse) {
           #movie_player .ytp-progress-bar-padding {
-            height: 34px !important;
+            height: 36px !important;
             top: -20px !important;
           }
           .ytp-scrubber-button {
@@ -205,7 +261,9 @@ export class TouchGestureController {
             border-radius: 9px !important;
             top: -5px !important;
           }
-          /* Ensure feed 3-dot action menus are visible without mouse hover on tablets */
+          #movie_player .ytp-right-controls .ytp-button {
+            margin: 0 2px !important;
+          }
           yt-lockup-view-model button[aria-label="More actions"],
           ytd-rich-item-renderer #menu yt-icon-button,
           ytd-compact-video-renderer #menu yt-icon-button,
@@ -225,33 +283,101 @@ export class TouchGestureController {
   }
 
   private mountHudAndCenterControls(player: HTMLElement): void {
+    if (!this.surfaceEl || !player.contains(this.surfaceEl)) {
+      const surface = el("div", { className: "ytpp-touch-surface" });
+
+      // Eat native click, dblclick, mousedown, mouseup, and contextmenu on the video surface
+      // so YouTube's desktop video click-to-pause / double-click-to-fullscreen never fire
+      const swallowEvent = (ev: Event) => {
+        if (!configStore.get().touchGesturesEnabled) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+      };
+      surface.addEventListener("click", swallowEvent);
+      surface.addEventListener("dblclick", swallowEvent);
+      surface.addEventListener("mousedown", swallowEvent);
+      surface.addEventListener("mouseup", swallowEvent);
+      surface.addEventListener("contextmenu", swallowEvent);
+
+      surface.addEventListener("pointerdown", (e) => this.onPointerDown(e, player, surface));
+      surface.addEventListener("pointermove", (e) => this.onPointerMove(e, player));
+      surface.addEventListener("pointerup", (e) => this.onPointerUp(e, player, surface));
+      surface.addEventListener("pointercancel", (e) => this.onPointerCancel(e, player, surface));
+
+      this.surfaceEl = surface;
+      player.appendChild(surface);
+    }
+
     if (!this.hudEl || !player.contains(this.hudEl)) {
       this.hudEl = el("div", { className: "ytpp-gesture-hud" });
       player.appendChild(this.hudEl);
     }
 
-    if (!this.centerPlayBtn || !player.contains(this.centerPlayBtn)) {
-      this.centerPlayBtn = el("button", {
-        className: "ytpp-touch-center-btn",
-        attrs: { type: "button", "aria-label": "播放或暂停" },
-        on: {
-          click: (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            const video = this.getVideo(player);
-            if (!video) return;
-            if (video.paused) {
-              void video.play();
-            } else {
-              video.pause();
-            }
-            this.syncCenterPlayIcon(video);
-            this.scheduleAutoHideTouchControls(player);
+    if (!this.centerClusterEl || !player.contains(this.centerClusterEl)) {
+      const stepRewindBtn = el(
+        "button",
+        {
+          className: "ytpp-touch-step-btn",
+          attrs: { type: "button", "aria-label": tr("快退 10 秒", "Rewind 10s") },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              this.stepSeekBy(player, -(configStore.get().touchDoubleTapSeekSec || 10));
+              this.scheduleAutoHideTouchControls(player);
+            },
           },
         },
-      });
-      this.centerPlayBtn.appendChild(createPlayerSvgIcon(PAUSE_ICON_PATH));
-      player.appendChild(this.centerPlayBtn);
+        [createPlayerSvgIcon(REWIND_ICON_PATH, 22)],
+      );
+
+      this.centerPlayBtn = el(
+        "button",
+        {
+          className: "ytpp-touch-center-btn",
+          attrs: { type: "button", "aria-label": tr("播放或暂停", "Play or Pause") },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              const video = this.getVideo(player);
+              if (!video) return;
+              if (video.paused) {
+                void video.play();
+              } else {
+                video.pause();
+              }
+              this.syncCenterPlayIcon(video);
+              this.scheduleAutoHideTouchControls(player);
+            },
+          },
+        },
+        [createPlayerSvgIcon(PAUSE_ICON_PATH, 30)],
+      );
+
+      const stepForwardBtn = el(
+        "button",
+        {
+          className: "ytpp-touch-step-btn",
+          attrs: { type: "button", "aria-label": tr("快进 10 秒", "Forward 10s") },
+          on: {
+            click: (e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              this.stepSeekBy(player, configStore.get().touchDoubleTapSeekSec || 10);
+              this.scheduleAutoHideTouchControls(player);
+            },
+          },
+        },
+        [createPlayerSvgIcon(FORWARD_ICON_PATH, 22)],
+      );
+
+      this.centerClusterEl = el("div", { className: "ytpp-touch-center-cluster" }, [
+        stepRewindBtn,
+        this.centerPlayBtn,
+        stepForwardBtn,
+      ]);
+      player.appendChild(this.centerClusterEl);
     }
 
     const video = this.getVideo(player);
@@ -263,6 +389,19 @@ export class TouchGestureController {
     }
   }
 
+  private stepSeekBy(player: HTMLElement, deltaSec: number): void {
+    const video = this.getVideo(player);
+    if (!video) return;
+    const dur = Number.isFinite(video.duration) ? video.duration : video.currentTime + 3600;
+    video.currentTime = Math.max(0, Math.min(dur, video.currentTime + deltaSec));
+    const absSec = Math.abs(deltaSec);
+    this.showHud(
+      deltaSec < 0
+        ? `${tr("快退", "Rewind")} ${absSec}s`
+        : `${tr("快进", "Forward")} ${absSec}s`,
+    );
+  }
+
   private syncCenterPlayIcon(video: HTMLVideoElement | null): void {
     if (!this.centerPlayBtn || !video) return;
     const pathEl = this.centerPlayBtn.querySelector("path");
@@ -270,10 +409,8 @@ export class TouchGestureController {
     if (pathEl) {
       pathEl.setAttribute("d", targetPath);
     } else {
-      while (this.centerPlayBtn.firstChild) {
-        this.centerPlayBtn.removeChild(this.centerPlayBtn.firstChild);
-      }
-      this.centerPlayBtn.appendChild(createPlayerSvgIcon(targetPath));
+      clearChildren(this.centerPlayBtn);
+      this.centerPlayBtn.appendChild(createPlayerSvgIcon(targetPath, 30));
     }
   }
 
@@ -281,20 +418,9 @@ export class TouchGestureController {
     return player.querySelector<HTMLVideoElement>("video.html5-main-video, video");
   }
 
-  private isInteractiveControl(target: Element | null): boolean {
-    if (!target) return false;
-    return Boolean(
-      target.closest(
-        ".ytp-chrome-bottom, .ytp-chrome-top, .ytp-settings-menu, .ytp-popup, .ytpp-subtitle-box, .ytpp-status-interactive, .ytpp-popover, .ytpp-panel-backdrop, .ytpp-touch-center-btn, button, a, input, select, textarea",
-      ),
-    );
-  }
-
   private showHud(primaryText: string, secondaryText?: string, autoHideMs = 1100): void {
     if (!this.hudEl) return;
-    while (this.hudEl.firstChild) {
-      this.hudEl.removeChild(this.hudEl.firstChild);
-    }
+    clearChildren(this.hudEl);
     this.hudEl.appendChild(el("div", { text: primaryText }));
     if (secondaryText) {
       this.hudEl.appendChild(
@@ -322,17 +448,21 @@ export class TouchGestureController {
     this.hudEl?.classList.remove("ytpp-visible");
   }
 
-  private onPointerDown(e: PointerEvent, player: HTMLElement): void {
-    player.dataset.ytppLastPointerType = e.pointerType;
-
-    // Only activate touch gesture state machine for touch/pen inputs; keep desktop mouse untouched
-    if (e.pointerType !== "touch" && e.pointerType !== "pen") {
-      return;
-    }
-
+  private onPointerDown(
+    e: PointerEvent,
+    player: HTMLElement,
+    surface: HTMLElement,
+  ): void {
     const cfg = configStore.get();
     if (!cfg.touchGesturesEnabled) return;
-    if (this.isInteractiveControl(e.target as Element | null)) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+
+    e.stopPropagation();
+    try {
+      surface.setPointerCapture(e.pointerId);
+    } catch {
+      // Ignore
+    }
 
     this.activePointers.set(e.pointerId, {
       pointerId: e.pointerId,
@@ -396,6 +526,7 @@ export class TouchGestureController {
   private onPointerMove(e: PointerEvent, player: HTMLElement): void {
     const pt = this.activePointers.get(e.pointerId);
     if (!pt) return;
+    e.stopPropagation();
     pt.currX = e.clientX;
     pt.currY = e.clientY;
 
@@ -431,8 +562,14 @@ export class TouchGestureController {
       if (absX > absY * 1.25) {
         this.gestureMode = "seek";
       } else if (absY > absX * 1.25) {
-        const isLeftHalf = pt.startX - rect.left < rect.width * 0.5;
-        this.gestureMode = isLeftHalf ? "brightness" : "volume";
+        const relX = (pt.startX - rect.left) / Math.max(1, rect.width);
+        if (relX < 0.33) {
+          this.gestureMode = "brightness";
+        } else if (relX > 0.67) {
+          this.gestureMode = "volume";
+        } else {
+          this.gestureMode = "fullscreen";
+        }
       }
     }
 
@@ -441,9 +578,7 @@ export class TouchGestureController {
     if (!video || rect.width <= 0 || rect.height <= 0) return;
 
     if (this.gestureMode === "seek") {
-      e.stopPropagation();
-      // Full width swipe corresponds to 160 seconds
-      const deltaSec = ((dx / rect.width) * 160);
+      const deltaSec = (dx / rect.width) * 160;
       const duration = Number.isFinite(video.duration) ? video.duration : 36000;
       this.targetSeekTimeSec = Math.max(0, Math.min(duration, this.seekStartTimeSec + deltaSec));
       const sign = deltaSec >= 0 ? "+" : "-";
@@ -456,7 +591,6 @@ export class TouchGestureController {
     }
 
     if (this.gestureMode === "volume") {
-      e.stopPropagation();
       const deltaVol = (-dy / (rect.height * 0.65)) * 100;
       const nextVol = Math.round(Math.max(0, Math.min(100, this.gestureStartVolume + deltaVol)));
       const ytPlayer = player as YtPlayerWithVolume;
@@ -471,7 +605,6 @@ export class TouchGestureController {
     }
 
     if (this.gestureMode === "brightness") {
-      e.stopPropagation();
       const deltaBri = (-dy / (rect.height * 0.65)) * 80;
       const nextBri = Math.round(
         Math.max(35, Math.min(145, this.gestureStartBrightness + deltaBri)),
@@ -479,13 +612,32 @@ export class TouchGestureController {
       this.currentBrightness = nextBri;
       video.style.filter = nextBri === 100 ? "" : `brightness(${nextBri}%)`;
       this.showHud(`${tr("亮度", "Brightness")} ${nextBri}%`, undefined, 800);
+      return;
+    }
+
+    if (this.gestureMode === "fullscreen") {
+      if (dy < -42) {
+        this.showHud(tr("上滑进入全屏", "Swipe up for Fullscreen"), undefined, 600);
+      } else if (dy > 42) {
+        this.showHud(tr("下滑退出全屏", "Swipe down to exit Fullscreen"), undefined, 600);
+      }
     }
   }
 
-  private onPointerUp(e: PointerEvent, player: HTMLElement): void {
+  private onPointerUp(
+    e: PointerEvent,
+    player: HTMLElement,
+    surface: HTMLElement,
+  ): void {
     const pt = this.activePointers.get(e.pointerId);
     if (!pt) return;
     this.activePointers.delete(e.pointerId);
+    e.stopPropagation();
+    try {
+      surface.releasePointerCapture(e.pointerId);
+    } catch {
+      // Ignore
+    }
 
     if (this.longPressActive) {
       this.clearLongPress(player);
@@ -508,6 +660,20 @@ export class TouchGestureController {
       return;
     }
 
+    if (this.gestureMode === "fullscreen") {
+      const dy = e.clientY - pt.startY;
+      const isFs = Boolean(
+        document.fullscreenElement || player.classList.contains("ytp-fullscreen"),
+      );
+      if (dy < -48 && !isFs) {
+        this.togglePlayerFullscreen(player);
+      } else if (dy > 48 && isFs) {
+        this.togglePlayerFullscreen(player);
+      }
+      this.gestureMode = "none";
+      return;
+    }
+
     if (
       this.gestureMode === "volume" ||
       this.gestureMode === "brightness" ||
@@ -519,29 +685,48 @@ export class TouchGestureController {
       return;
     }
 
-    // It was a clean tap (movement < 14px)
+    // Clean tap (movement < 14px)
     const dx = Math.abs(e.clientX - pt.startX);
     const dy = Math.abs(e.clientY - pt.startY);
     if (dx < 14 && dy < 14 && this.activePointers.size === 0) {
-      this.handleTouchTap(e.clientX, e.clientY, player);
+      this.handleTap(e.clientX, e.clientY, player);
     }
   }
 
-  private onPointerCancel(e: PointerEvent, player: HTMLElement): void {
+  private togglePlayerFullscreen(player: HTMLElement): void {
+    const ytPlayer = player as YtPlayerWithVolume;
+    if (typeof ytPlayer.toggleFullscreen === "function") {
+      ytPlayer.toggleFullscreen();
+      return;
+    }
+    const fsBtn = player.querySelector<HTMLElement>(".ytp-fullscreen-button");
+    fsBtn?.click();
+  }
+
+  private onPointerCancel(
+    e: PointerEvent,
+    player: HTMLElement,
+    surface: HTMLElement,
+  ): void {
     this.activePointers.delete(e.pointerId);
+    try {
+      surface.releasePointerCapture(e.pointerId);
+    } catch {
+      // Ignore
+    }
     this.clearLongPress(player);
     if (this.activePointers.size === 0) {
       this.gestureMode = "none";
     }
   }
 
-  private handleTouchTap(clientX: number, clientY: number, player: HTMLElement): void {
+  private handleTap(clientX: number, clientY: number, player: HTMLElement): void {
     const now = performance.now();
     const dt = now - this.lastTapTime;
     const dist = Math.hypot(clientX - this.lastTapX, clientY - this.lastTapY);
 
-    if (dt < 280 && dist < 48) {
-      // Double tap detected!
+    if (dt < 280 && dist < 52) {
+      // Double tap detected
       if (this.singleTapTimer) {
         clearTimeout(this.singleTapTimer);
         this.singleTapTimer = null;
@@ -561,13 +746,10 @@ export class TouchGestureController {
     this.singleTapTimer = setTimeout(() => {
       this.singleTapTimer = null;
       this.executeSingleTap(player);
-    }, 260);
+    }, 230);
   }
 
   private executeSingleTap(player: HTMLElement): void {
-    const cfg = configStore.get();
-    if (!cfg.touchSingleTapToggleControls) return;
-
     const isShown = player.classList.toggle("ytpp-touch-controls-shown");
     if (isShown) {
       const video = this.getVideo(player);
@@ -575,6 +757,7 @@ export class TouchGestureController {
       player.classList.remove("ytp-autohide");
       this.scheduleAutoHideTouchControls(player);
     } else {
+      player.classList.add("ytp-autohide");
       if (this.controlsHideTimer) {
         clearTimeout(this.controlsHideTimer);
         this.controlsHideTimer = null;
@@ -600,13 +783,10 @@ export class TouchGestureController {
     const relX = (clientX - rect.left) / rect.width;
     const seekSec = configStore.get().touchDoubleTapSeekSec || 10;
 
-    if (relX < 0.35) {
-      video.currentTime = Math.max(0, video.currentTime - seekSec);
-      this.showHud(`${tr("快退", "Rewind")} ${seekSec}s`);
-    } else if (relX > 0.65) {
-      const dur = Number.isFinite(video.duration) ? video.duration : video.currentTime + seekSec;
-      video.currentTime = Math.min(dur, video.currentTime + seekSec);
-      this.showHud(`${tr("快进", "Forward")} ${seekSec}s`);
+    if (relX < 0.3) {
+      this.stepSeekBy(player, -seekSec);
+    } else if (relX > 0.7) {
+      this.stepSeekBy(player, seekSec);
     } else {
       if (video.paused) {
         void video.play();
@@ -615,6 +795,7 @@ export class TouchGestureController {
         video.pause();
         this.showHud(tr("暂停", "Pause"));
       }
+      this.syncCenterPlayIcon(video);
     }
   }
 

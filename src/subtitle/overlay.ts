@@ -13,8 +13,6 @@ export class SubtitleOverlay {
   private sourceLine: HTMLElement | null = null;
   private statusTextEl: HTMLElement | null = null;
   private statusLabelEl: HTMLElement | null = null;
-  private statusProgressWrapEl: HTMLElement | null = null;
-  private statusProgressFillEl: HTMLElement | null = null;
   private statusSkipBtnEl: HTMLElement | null = null;
 
   private isDragging = false;
@@ -84,22 +82,12 @@ export class SubtitleOverlay {
         align-items: center;
         pointer-events: none;
         user-select: none;
-        will-change: transform, bottom;
-        transition: bottom 0.18s cubic-bezier(0.22, 1, 0.36, 1);
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
       }
 
-      /* Match native YouTube caption window lift when bottom chrome is shown */
-      #movie_player:not(.ytp-autohide):not(.ytpp-dragging-subtitle) .ytpp-subtitle-layer,
-      #movie_player.ytpp-touch-controls-shown:not(.ytpp-dragging-subtitle) .ytpp-subtitle-layer,
-      #movie_player.ytpp-popover-open:not(.ytpp-dragging-subtitle) .ytpp-subtitle-layer {
-        bottom: max(var(--ytpp-sub-bottom, 6%), 64px);
-      }
-
-      #movie_player.ytp-big-mode:not(.ytp-autohide):not(.ytpp-dragging-subtitle) .ytpp-subtitle-layer,
-      #movie_player.ytp-fullscreen:not(.ytp-autohide):not(.ytpp-dragging-subtitle) .ytpp-subtitle-layer {
-        bottom: max(var(--ytpp-sub-bottom, 6%), 84px);
+      .ytpp-subtitle-layer.ytpp-dragging {
+        will-change: transform;
       }
 
       /* Hide player progress bar & bottom controls while dragging subtitles so user can place them at the very bottom */
@@ -110,78 +98,64 @@ export class SubtitleOverlay {
         transition: opacity 0.1s ease !important;
       }
 
-      @keyframes ytpp-pulse-dot {
-        0%, 100% { opacity: 0.45; transform: scale(0.88); }
-        50% { opacity: 1; transform: scale(1.08); }
-      }
-
+      /* Unified YT+ in-player toast / pill surface (shared across Subtitle status & SponsorBlock) */
+      .ytpp-toast-pill,
       .ytpp-subtitle-status {
         pointer-events: auto;
-        margin-bottom: 8px;
         padding: 6px 12px;
-        border-radius: 999px;
-        background: rgba(18, 18, 22, 0.78);
-        backdrop-filter: blur(16px) saturate(140%);
-        -webkit-backdrop-filter: blur(16px) saturate(140%);
+        border-radius: 10px;
+        background: rgba(16, 16, 20, 0.92);
         border: 1px solid rgba(255, 255, 255, 0.12);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
-        color: #f1f1f1;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+        color: #f3f3f5;
         font-family: "YouTube Sans", Roboto, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif;
         font-size: 12.5px;
         font-weight: 500;
         font-variant-numeric: tabular-nums;
-        line-height: 1.3;
+        line-height: 1.35;
         display: inline-flex;
         align-items: center;
-        gap: 8px;
+        gap: 9px;
+        user-select: none;
+        -webkit-font-smoothing: antialiased;
       }
 
+      .ytpp-subtitle-status {
+        margin-bottom: 8px;
+      }
+
+      .ytpp-toast-dot,
       .ytpp-status-dot {
         width: 7px;
         height: 7px;
         border-radius: 50%;
         background: #ff2a55;
-        box-shadow: 0 0 8px rgba(255, 42, 85, 0.8);
-        animation: ytpp-pulse-dot 1.4s ease-in-out infinite;
         flex-shrink: 0;
       }
 
-      .ytpp-status-progress {
-        width: 48px;
-        height: 4px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
-        overflow: hidden;
-        flex-shrink: 0;
-      }
-
-      .ytpp-status-progress-fill {
-        height: 100%;
-        width: 0%;
-        border-radius: 999px;
-        background: linear-gradient(90deg, #ff0033, #ff4d79);
-        transition: width 0.2s cubic-bezier(0.22, 1, 0.36, 1);
-      }
-
+      .ytpp-toast-action-btn,
       .ytpp-status-skip-btn {
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid rgba(255, 255, 255, 0.14);
         background: rgba(255, 255, 255, 0.1);
         color: #ffffff;
         font-family: inherit;
         font-size: 11.5px;
         font-weight: 500;
-        padding: 2px 8px;
-        border-radius: 999px;
+        line-height: 1.2;
+        padding: 3px 9px;
+        border-radius: 6px;
         cursor: pointer;
+        flex-shrink: 0;
         transition: background 0.14s ease, border-color 0.14s ease;
       }
 
+      .ytpp-toast-action-btn:hover,
       .ytpp-status-skip-btn:hover {
-        background: rgba(255, 255, 255, 0.22);
-        border-color: rgba(255, 255, 255, 0.3);
+        background: rgba(255, 255, 255, 0.2);
+        border-color: rgba(255, 255, 255, 0.28);
       }
 
-      /* Modern refined dual-line subtitle container */
+      /* Modern refined dual-line subtitle container (zero per-frame backdrop-filter GPU blur) */
       .ytpp-subtitle-box {
         pointer-events: auto;
         cursor: grab;
@@ -201,8 +175,6 @@ export class SubtitleOverlay {
 
       .ytpp-subtitle-box.ytpp-with-backdrop {
         background: rgba(10, 10, 14, var(--ytpp-backdrop-alpha, 0.42));
-        backdrop-filter: blur(6px);
-        -webkit-backdrop-filter: blur(6px);
         border: 1px solid rgba(255, 255, 255, calc(var(--ytpp-backdrop-alpha, 0.42) * 0.14));
         box-shadow: 0 4px 16px rgba(0, 0, 0, calc(var(--ytpp-backdrop-alpha, 0.42) * 0.55));
       }
@@ -239,14 +211,8 @@ export class SubtitleOverlay {
     }
 
     this.statusLabelEl = el("span", { className: "ytpp-status-label" });
-    this.statusProgressFillEl = el("div", { className: "ytpp-status-progress-fill" });
-    this.statusProgressWrapEl = el(
-      "div",
-      { className: "ytpp-status-progress", style: { display: "none" } },
-      [this.statusProgressFillEl],
-    );
     this.statusSkipBtnEl = el("button", {
-      className: "ytpp-status-skip-btn",
+      className: "ytpp-toast-action-btn ytpp-status-skip-btn",
       text: tr("跳过等待", "Skip"),
       attrs: { type: "button", title: tr("立即播放视频", "Play immediately") },
       style: { display: "none" },
@@ -262,13 +228,12 @@ export class SubtitleOverlay {
     this.statusTextEl = el(
       "div",
       {
-        className: "ytpp-subtitle-status",
+        className: "ytpp-toast-pill ytpp-subtitle-status",
         style: { display: "none" },
       },
       [
-        el("span", { className: "ytpp-status-dot" }),
+        el("span", { className: "ytpp-toast-dot ytpp-status-dot" }),
         this.statusLabelEl,
-        this.statusProgressWrapEl,
         this.statusSkipBtnEl,
       ],
     );
@@ -419,17 +384,6 @@ export class SubtitleOverlay {
 
     if (this.statusLabelEl) {
       this.statusLabelEl.textContent = message;
-    }
-
-    const ratioMatch = message.match(/(\d+)\s*\/\s*(\d+)/);
-    if (ratioMatch && this.statusProgressWrapEl && this.statusProgressFillEl) {
-      const done = Number.parseInt(ratioMatch[1], 10) || 0;
-      const total = Math.max(1, Number.parseInt(ratioMatch[2], 10) || 1);
-      const pct = Math.min(100, Math.max(6, Math.round((done / total) * 100)));
-      this.statusProgressFillEl.style.width = `${pct}%`;
-      this.statusProgressWrapEl.style.display = "block";
-    } else if (this.statusProgressWrapEl) {
-      this.statusProgressWrapEl.style.display = "none";
     }
 
     if (this.statusSkipBtnEl) {
